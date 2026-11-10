@@ -5,7 +5,7 @@
  * Το πόσο τελικά θα κινηθεί κάθε μπάρα το αποφασίζουν οι κανόνες εδώ, ώστε η
  * συμπεριφορά να είναι προβλέψιμη και να ελέγχεται με tests.
  */
-import { DIMENSIONS, DIMENSION_BY_KEY, EMOTION_KEYS, INNER_KEYS, PERCEPTION_KEYS } from "./dimensions";
+import { DIMENSIONS, DIMENSION_BY_KEY, EMOTION_KEYS, INNER_KEYS, PERCEPTION_KEYS, URGE_KEYS } from "./dimensions";
 
 export type BrainValues = Record<string, number>;
 
@@ -149,7 +149,7 @@ export function applyAppraisal(values: BrainValues, appraisal: Appraisal): Brain
     const total = (delta[key] ?? 0) + (coupled[key] ?? 0);
     if (total !== 0) out[key] = round1(clamp(before[key] + total));
   }
-  return out;
+  return updateUrges(out);
 }
 
 /** Συναισθήματα που εκτονώνονται όταν εκφραστούν. */
@@ -178,6 +178,102 @@ export function applyExpression(values: BrainValues, expressed: Record<string, n
     out.boredom = round1(clamp(out.boredom - 3 * n));
   }
   return out;
+}
+
+// ------------------------------------------------------------------ Χρόνος
+
+const DAY_MIN = 24 * 60;
+
+/**
+ * Το πέρασμα του χρόνου: φθορά προς το baseline, και "έλλειψη" που μεγαλώνει όσο
+ * ο συνομιλητής σωπαίνει — πιο πολύ όταν τον συμπαθεί και έχει ανάγκη επαφής.
+ * `silenceMin` = λεπτά από το τελευταίο μήνυμα του συνομιλητή (null αν δεν έχει μιλήσει ποτέ).
+ */
+export function applyTime(values: BrainValues, elapsedMin: number, silenceMin: number | null): BrainValues {
+  const out = decay(values, elapsedMin);
+  if (silenceMin !== null) {
+    const pull = 0.3 + (0.7 * (out.liking + out.sociability)) / 200;
+    const grown = 100 * (1 - Math.exp(-silenceMin / DAY_MIN)) * pull;
+    out.longing = round1(clamp(Math.max(out.longing, grown)));
+  }
+  return out;
+}
+
+/**
+ * Ο συνομιλητής μόλις έγραψε: η κουβέντα "ζωντανεύει", και αν είχε λείψει,
+ * η επιστροφή του φέρνει χαρά ανάλογη με τη συμπάθεια.
+ */
+export function applyArrival(values: BrainValues): BrainValues {
+  const out: BrainValues = { ...values };
+  out.presence = round1(clamp(out.presence + (100 - out.presence) * 0.5));
+  if (out.longing > 10) {
+    out.joy = round1(clamp(out.joy + out.longing * 0.3 * (out.liking / 100)));
+    out.anticipation = round1(clamp(out.anticipation + out.longing * 0.15));
+    out.longing = round1(out.longing * 0.4);
+  }
+  return out;
+}
+
+// -------------------------------------------------------------- Παρορμήσεις
+
+/**
+ * Από το συναίσθημα στην πράξη: κάθε παρόρμηση είναι σταθμισμένο άθροισμα άλλων δεικτών.
+ * Ο θυμός σπρώχνει προς την αντιπαράθεση, η πίκρα προς την απόσυρση, η περιέργεια προς την ερώτηση.
+ */
+const URGE_RULES: Record<string, { bias?: number; from: [key: string, weight: number][] }> = {
+  u_ask: { from: [["curiosity", 0.5], ["thirst", 0.3], ["wonder", 0.3], ["anger", -0.4], ["boredom", -0.3]] },
+  u_share: { from: [["sociability", 0.4], ["trust", 0.3], ["familiarity", 0.3], ["joy", 0.2], ["fear", -0.3], ["hurt", -0.3]] },
+  u_listen: { from: [["p_distress", 0.6], ["p_sincerity", 0.3], ["empathy", 0.25], ["anger", -0.3]] },
+  u_comfort: { from: [["p_distress", 0.7], ["tenderness", 0.3], ["empathy", 0.1], ["anger", -0.4]] },
+  u_tease: { from: [["playfulness", 0.6], ["p_humor", 0.3], ["familiarity", 0.2], ["anger", -0.5], ["sadness", -0.3], ["p_distress", -0.3]] },
+  u_thank: { from: [["gratitude", 0.8], ["p_kindness", 0.2]] },
+  u_apologize: { from: [["embarrassment", 0.9]] },
+  u_confront: { from: [["anger", 0.7], ["frustration", 0.3], ["p_provocation", 0.3], ["audacity", 0.15], ["patience", -0.2]] },
+  u_insist: { bias: -25, from: [["stubbornness", 0.4], ["p_provocation", 0.4], ["confidence", 0.2]] },
+  u_withdraw: { from: [["hurt", 0.5], ["fear", 0.4], ["boredom", 0.3], ["sadness", 0.3], ["anger", 0.2], ["sociability", -0.15]] },
+};
+
+export function urgeTarget(key: string, v: BrainValues): number {
+  const rule = URGE_RULES[key];
+  return clamp(rule.from.reduce((sum, [k, w]) => sum + v[k] * w, rule.bias ?? 0));
+}
+
+/** Οι παρορμήσεις ακολουθούν την κατάσταση με μικρή αδράνεια. */
+export function updateUrges(values: BrainValues): BrainValues {
+  const out: BrainValues = { ...values };
+  for (const key of URGE_KEYS) out[key] = round1(out[key] * 0.3 + urgeTarget(key, values) * 0.7);
+  return out;
+}
+
+/** Μια παρόρμηση που έγινε πράξη ικανοποιείται — και χρειάζεται χρόνο να ξαναχτιστεί. */
+export function applyActs(values: BrainValues, acts: string[]): BrainValues {
+  const out: BrainValues = { ...values };
+  for (const key of acts) if (URGE_KEYS.includes(key)) out[key] = round1(out[key] * 0.25);
+  return out;
+}
+
+// -------------------------------------------------------------- Πρωτοβουλία
+
+/** Πόσο θέλει να πάρει τον λόγο χωρίς να της έχουν μιλήσει (0–100). */
+export function initiativeDrive(v: BrainValues): number {
+  return clamp(
+    0.35 * v.curiosity + 0.25 * v.sociability + 0.2 * v.wonder + 0.2 * v.liking + 0.2 * v.longing -
+      0.5 * v.anger - 0.4 * v.hurt - 0.3 * v.boredom,
+  );
+}
+
+/**
+ * Πόσα λεπτά σιωπής αντέχει πριν μιλήσει πρώτη. Όσο πιο δυνατή η ώθηση, τόσο λιγότερα.
+ * `unanswered` = πόσα δικά της μηνύματα πρωτοβουλίας έχουν ήδη μείνει αναπάντητα:
+ * μετά το πρώτο περιμένει πολύ περισσότερο, μετά το δεύτερο ξαναδοκιμάζει μόνο ύστερα
+ * από ώρες, και μετά το τέταρτο σταματά — δεν κυνηγά όποιον δεν απαντά.
+ */
+export function initiativeWaitMin(drive: number, unanswered: number): number {
+  if (drive < 25 || unanswered >= 4) return Infinity;
+  const base = 1.5 * Math.pow(2, (100 - drive) / 25);
+  if (unanswered <= 0) return base;
+  if (unanswered === 1) return base * 4;
+  return Math.max(6 * 60, base * 4);
 }
 
 /** Πόσο "φορτισμένη" είναι η στιγμή (0–1): μέσος όρος των τριών εντονότερων αποκλίσεων συναισθήματος. */

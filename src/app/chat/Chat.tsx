@@ -31,6 +31,37 @@ export function Chat({ initialMessages, initialValues, initialImpression, dimens
   const [inspect, setInspect] = useState(false);
   const bottom = useRef<HTMLDivElement>(null);
 
+  // Σφυγμός: όσο σωπαίνεις, ρωτάμε τον server πότε θα "αντέξει" τη σιωπή — και αν μίλησε πρώτη.
+  const live = useRef({ busy, typing: false });
+  live.current = { busy, typing: text.trim() !== "" };
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const schedule = useRef<(sec: number) => void>(() => {});
+  schedule.current = (sec: number) => {
+    clearTimeout(timer.current);
+    timer.current = setTimeout(async () => {
+      // Δεν διακόπτει όσο γράφεις ή όσο η καρτέλα είναι κρυμμένη.
+      if (live.current.busy || live.current.typing || document.visibilityState !== "visible") {
+        schedule.current(20);
+        return;
+      }
+      try {
+        const res = await fetch("/api/pulse", { method: "POST" });
+        const body = res.ok ? await res.json() : null;
+        if (body?.message) {
+          setMessages((m) => [...m, { role: "assistant", content: body.message }]);
+          setValues(body.values);
+        }
+        if (typeof body?.nextInSec === "number") schedule.current(Math.min(Math.max(body.nextInSec, 15), 1800));
+      } catch {
+        schedule.current(120);
+      }
+    }, sec * 1000);
+  };
+  useEffect(() => {
+    schedule.current(3);
+    return () => clearTimeout(timer.current);
+  }, []);
+
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: "end" });
   }, [messages, busy]);
@@ -57,6 +88,7 @@ export function Chat({ initialMessages, initialValues, initialImpression, dimens
       setMessages((m) => [...m, { role: "assistant", content: body.reply }]);
       setValues(body.values);
       setDebug(body.debug);
+      schedule.current(45);
     } catch (err) {
       // Το μήνυμα δεν αποθηκεύτηκε: το επιστρέφουμε στο πεδίο για να ξανασταλεί.
       setMessages((m) => m.slice(0, -1));

@@ -8,7 +8,7 @@
 import type { Db } from "@/db";
 import * as repo from "@/db/repo";
 import type { LlmProvider } from "@/llm/types";
-import { INNER_KEYS, PERCEPTION_KEYS } from "./dimensions";
+import { INNER_KEYS, PERCEPTION_KEYS, URGE_KEYS } from "./dimensions";
 import {
   MIN_IMPORTANCE,
   SAME_MEMORY_SIMILARITY,
@@ -17,13 +17,26 @@ import {
   recall,
   type MemoryKind,
 } from "./memory";
-import { PERCEIVE_SYSTEM, REFLECT_SYSTEM, perceivePrompt, reflectPrompt, respondSystem } from "./prompts";
 import {
+  PERCEIVE_SYSTEM,
+  REFLECT_SYSTEM,
+  initiativeBlock,
+  perceivePrompt,
+  reflectPrompt,
+  respondSystem,
+  silenceTurn,
+  type TimeSense,
+} from "./prompts";
+import {
+  applyActs,
   applyAppraisal,
+  applyArrival,
   applyExpression,
+  applyTime,
   arousal,
   clamp,
-  decay,
+  initiativeDrive,
+  initiativeWaitMin,
   valence,
   type Appraisal,
   type BrainValues,
@@ -68,6 +81,7 @@ function parseAppraisal(raw: unknown): Appraisal {
 
 interface Reflection {
   expressed: Record<string, number>;
+  acts: string[];
   memories: { kind: MemoryKind; content: string; importance: number; valence: number }[];
   impression: string;
 }
@@ -86,8 +100,28 @@ function parseReflection(raw: unknown): Reflection {
     .slice(0, 4);
   return {
     expressed: numbers(r.expressed, INNER_KEYS),
+    acts: (Array.isArray(r.acts) ? r.acts : []).filter((a): a is string => URGE_KEYS.includes(a as string)),
     memories,
     impression: typeof r.impression === "string" ? r.impression.trim().slice(0, 600) : "",
+  };
+}
+
+const minutesBetween = (from: Date, to: Date) => Math.max(0, to.getTime() - from.getTime()) / 60000;
+
+/** Μια παύση πάνω από τόσα λεπτά χωρίζει δύο "κουβέντες". */
+const SESSION_GAP_MIN = 30;
+
+/** Η αίσθηση του χρόνου, από τις ώρες των αποθηκευμένων μηνυμάτων. */
+function senseTime(stored: repo.StoredMessage[], now: Date): TimeSense {
+  const lastUser = [...stored].reverse().find((m) => m.role === "user");
+  let sessionStart = now;
+  for (let i = stored.length - 1; i >= 0; i--) {
+    if (minutesBetween(stored[i].createdAt, sessionStart) > SESSION_GAP_MIN) break;
+    sessionStart = stored[i].createdAt;
+  }
+  return {
+    silenceMin: lastUser ? minutesBetween(lastUser.createdAt, now) : null,
+    sessionMin: minutesBetween(sessionStart, now),
   };
 }
 
@@ -105,16 +139,17 @@ export async function processTurn(
   ]);
   const history = stored.map((m) => ({ role: m.role, content: m.content }));
 
-  // 1. Ο χρόνος που πέρασε από την τελευταία κουβέντα καταλαγιάζει τα πράγματα.
-  const elapsedMin = state.updatedAt ? (now.getTime() - state.updatedAt.getTime()) / 60000 : 1;
-  let values = decay(state.values, elapsedMin);
+  // 1. Ο χρόνος: ό,τι ένιωθε καταλαγιάζει, η σιωπή αφήνει έλλειψη, και η επιστροφή του κάτι σημαίνει.
+  const time = senseTime(stored, now);
+  const elapsedMin = state.updatedAt ? minutesBetween(state.updatedAt, now) : 1;
+  let values = applyArrival(applyTime(state.values, elapsedMin, time.silenceMin));
 
   // 2. Αντίληψη (και, παράλληλα, το "αποτύπωμα" του μηνύματος για την ανάκληση).
   const [appraisal, cue] = await Promise.all([
     llm
       .generateJson({
         system: PERCEIVE_SYSTEM,
-        prompt: perceivePrompt({ values, impression: state.impression, history: history.slice(-6), message }),
+        prompt: perceivePrompt({ values, impression: state.impression, history: history.slice(-6), message, time }),
       })
       .then(parseAppraisal)
       .catch((err): Appraisal => {
@@ -134,7 +169,7 @@ export async function processTurn(
 
   // 4. Απόκριση. Αν αποτύχει, ο γύρος ακυρώνεται και δεν αποθηκεύεται τίποτα.
   const reply = await llm.generateText({
-    system: respondSystem({ values, impression: state.impression, recalled, userName: user.name, now }),
+    system: respondSystem({ values, impression: state.impression, recalled, userName: user.name, now, time }),
     messages: [...history, { role: "user", content: message }],
     temperature: 0.9,
   });
@@ -148,7 +183,7 @@ export async function processTurn(
     .then(parseReflection)
     .catch((err): Reflection => {
       console.error("[brAIn] ο αναστοχασμός απέτυχε:", err);
-      return { expressed: {}, memories: [], impression: "" };
+      return { expressed: {}, acts: [], memories: [], impression: "" };
     });
 
   // 6. Εγγραφή στη μνήμη — μόνο όσων ξεπερνούν το κατώφλι, με βάρος τη φόρτιση της στιγμής.
@@ -180,7 +215,7 @@ export async function processTurn(
   );
 
   // 7. Κάθαρση και αποθήκευση.
-  values = applyExpression(values, reflection.expressed, learned);
+  values = applyActs(applyExpression(values, reflection.expressed, learned), reflection.acts);
   const impression = reflection.impression || state.impression;
 
   await repo.addMessage(db, user.id, "user", message, { appraisal }, now);
@@ -197,4 +232,65 @@ export async function processTurn(
       impression,
     },
   };
+}
+
+export interface PulseResult {
+  /** Το μήνυμα που έστειλε με δική της πρωτοβουλία, αν έστειλε. */
+  message: string | null;
+  values: BrainValues | null;
+  /** Σε πόσα δευτερόλεπτα αξίζει να ξαναρωτήσει ο client· null = όχι πριν μιλήσει ο συνομιλητής. */
+  nextInSec: number | null;
+}
+
+/**
+ * Ο "σφυγμός": καλείται όσο ο συνομιλητής σωπαίνει. Δεν κάνει καμία κλήση σε μοντέλο
+ * εκτός αν η εσωτερική ώθηση (περιέργεια, ανάγκη επαφής, έλλειψη) έχει ξεπεράσει την αντοχή
+ * της στη σιωπή — τότε παίρνει η ίδια τον λόγο.
+ */
+export async function pulse(
+  deps: { db: Db; llm: LlmProvider; now?: Date },
+  user: { id: string; name: string },
+): Promise<PulseResult> {
+  const { db, llm } = deps;
+  const now = deps.now ?? new Date();
+  const idle: PulseResult = { message: null, values: null, nextInSec: null };
+
+  const [state, stored] = await Promise.all([
+    repo.loadBrainState(db, user.id),
+    repo.recentMessages(db, user.id, WORKING_MEMORY),
+  ]);
+  // Δεν ξεκινά κουβέντα με κάποιον που δεν της έχει μιλήσει ποτέ.
+  if (!state.updatedAt || !stored.length) return idle;
+
+  const time = senseTime(stored, now);
+  const quietMin = minutesBetween(stored[stored.length - 1].createdAt, now);
+  // Πόσα δικά της μηνύματα στη σειρά, πέρα από την κανονική απάντηση, έχουν μείνει αναπάντητα.
+  let trailing = 0;
+  for (let i = stored.length - 1; i >= 0 && stored[i].role === "assistant"; i--) trailing++;
+  const unanswered = Math.max(0, trailing - 1);
+
+  let values = applyTime(state.values, minutesBetween(state.updatedAt, now), time.silenceMin);
+  const waitMin = initiativeWaitMin(initiativeDrive(values), unanswered);
+  if (!Number.isFinite(waitMin)) return idle;
+  if (quietMin < waitMin) {
+    return { message: null, values: null, nextInSec: Math.ceil((waitMin - quietMin) * 60) + 1 };
+  }
+
+  const memories = await repo.listMemories(db, user.id);
+  const recalled = recall(memories, [], valence(values), now, 4);
+  const message = await llm.generateText({
+    system:
+      respondSystem({ values, impression: state.impression, recalled, userName: user.name, now, time }) +
+      initiativeBlock(quietMin, unanswered),
+    messages: [...stored.map((m) => ({ role: m.role, content: m.content })), { role: "user", content: silenceTurn(quietMin) }],
+    temperature: 1,
+  });
+
+  // Είπε αυτό που ήθελε: οι παρορμήσεις που την έσπρωξαν ικανοποιούνται.
+  values = applyActs(values, ["u_ask", "u_share"]);
+  await repo.addMessage(db, user.id, "assistant", message, { values, proactive: true }, now);
+  await repo.saveBrainState(db, user.id, { ...state, values, updatedAt: now }, now);
+
+  const nextWait = initiativeWaitMin(initiativeDrive(values), unanswered + 1);
+  return { message, values, nextInSec: Number.isFinite(nextWait) ? Math.ceil(nextWait * 60) + 1 : null };
 }

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { processTurn } from "@/brain/pipeline";
+import { processTurn, pulse } from "@/brain/pipeline";
 import { createPgliteDb, type Db } from "@/db";
 import { createUser, listMemories, loadBrainState, recentMessages } from "@/db/repo";
 import { MockProvider } from "@/llm/mock";
@@ -45,6 +45,37 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     expect(stored.values.anger).toBe(calmer.values.anger);
     const msgs = await recentMessages(db, user.id, 4);
     expect(msgs.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
+  });
+
+  it("παίρνει τον λόγο μόνη της όταν η σιωπή κρατήσει, αλλά δεν επιμένει για πάντα", async () => {
+    const fresh = await createUser(db, { email: "c@d.gr", name: "Άννα", passwordHash: "x" });
+    let clock = new Date("2026-07-01T10:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+
+    // Δεν μιλά πρώτη σε κάποιον που δεν της έχει γράψει ποτέ.
+    expect((await pulse({ db, llm, now: at(0) }, fresh)).nextInSec).toBeNull();
+
+    await processTurn({ db, llm, now: at(1) }, fresh, "Γεια σου!");
+    const soon = await pulse({ db, llm, now: at(0.5) }, fresh);
+    expect(soon.message).toBeNull();
+    expect(soon.nextInSec).toBeGreaterThan(30);
+
+    const first = await pulse({ db, llm, now: at(soon.nextInSec! / 60) }, fresh);
+    expect(first.message).toContain("σκεφτόμουν");
+    expect((await pulse({ db, llm, now: at(1) }, fresh)).message).toBeNull();
+    const second = await pulse({ db, llm, now: at(first.nextInSec! / 60) }, fresh);
+    expect(second.message).not.toBeNull();
+    // Δύο αναπάντητα: τώρα περιμένει ώρες.
+    expect((await pulse({ db, llm, now: at(60) }, fresh)).message).toBeNull();
+    expect(second.nextInSec).toBeGreaterThanOrEqual(360 * 60);
+
+    const msgs = await recentMessages(db, fresh.id, 10);
+    expect(msgs.map((m) => m.role)).toEqual(["user", "assistant", "assistant", "assistant"]);
+
+    // Μόλις απαντήσει, ο κύκλος ξαναρχίζει — και θυμάται ότι έλειψε.
+    const back = await processTurn({ db, llm, now: at(3 * 24 * 60) }, fresh, "Συγγνώμη που χάθηκα.");
+    expect(back.values.presence).toBeGreaterThan(40);
+    expect((await pulse({ db, llm, now: at(0.5) }, fresh)).nextInSec).toBeLessThan(3600);
   });
 
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {

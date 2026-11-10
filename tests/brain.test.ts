@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { DIMENSIONS } from "@/brain/dimensions";
 import { cosine, encodeImportance, recall, strength, type Memory } from "@/brain/memory";
-import { applyAppraisal, applyExpression, decay, initialValues } from "@/brain/state";
+import {
+  applyActs,
+  applyAppraisal,
+  applyArrival,
+  applyExpression,
+  applyTime,
+  decay,
+  initialValues,
+  initiativeDrive,
+  initiativeWaitMin,
+} from "@/brain/state";
 
 const insult = { perception: { p_hostility: 90 }, impulses: { anger: 80, liking: -50, trust: -50 } };
 const apology = { perception: { p_kindness: 80 }, impulses: { anger: -60, liking: 30, trust: 30 } };
@@ -100,5 +110,62 @@ describe("μνήμη", () => {
     const bright = mem({ content: "γλυκό", valence: 1 });
     expect(recall([bright, dark], [1, 0], -1, now)[0].memory.content).toBe("πικρό");
     expect(cosine([1, 2], [2, 4])).toBeCloseTo(1);
+  });
+});
+
+describe("χρόνος, παρορμήσεις, πρωτοβουλία", () => {
+  it("η σιωπή αφήνει έλλειψη — περισσότερη όταν τον συμπαθεί — και η επιστροφή φέρνει χαρά", () => {
+    const base = initialValues();
+    const hour = applyTime(base, 60, 60);
+    const week = applyTime(base, 7 * 24 * 60, 7 * 24 * 60);
+    const fond = applyTime({ ...base, liking: 95 }, 7 * 24 * 60, 7 * 24 * 60);
+    expect(hour.longing).toBeLessThan(5);
+    expect(week.longing).toBeGreaterThan(40);
+    expect(fond.longing).toBeGreaterThan(week.longing);
+    expect(applyTime(base, 60, null).longing).toBe(0);
+
+    const back = applyArrival(fond);
+    expect(back.joy).toBeGreaterThan(fond.joy);
+    expect(back.longing).toBeLessThan(fond.longing);
+  });
+
+  it("η παρουσία χτίζεται όσο μιλάμε και σβήνει όταν σταματήσουμε", () => {
+    let v = initialValues();
+    for (let i = 0; i < 5; i++) v = applyArrival(applyTime(v, 1, 1));
+    expect(v.presence).toBeGreaterThan(80);
+    expect(applyTime(v, 120, 120).presence).toBeLessThan(1);
+  });
+
+  it("ο θυμός γεννά αντιπαράθεση και σβήνει την όρεξη για ερωτήσεις και πειράγματα", () => {
+    const calm = applyAppraisal(initialValues(), { perception: {}, impulses: {} });
+    let angry = initialValues();
+    for (let i = 0; i < 4; i++) angry = applyAppraisal(angry, { perception: { p_provocation: 90 }, impulses: { anger: 90 } });
+    expect(calm.u_confront).toBeLessThan(5);
+    expect(angry.u_confront).toBeGreaterThan(40);
+    expect(angry.u_ask).toBeLessThan(calm.u_ask);
+    expect(angry.u_tease).toBeLessThan(calm.u_tease);
+  });
+
+  it("μια ερώτηση που έγινε ικανοποιεί την παρόρμηση, που μετά ξαναχτίζεται", () => {
+    const neutral = { perception: {}, impulses: {} };
+    const before = applyAppraisal(initialValues(), neutral);
+    const asked = applyActs(before, ["u_ask", "άγνωστο"]);
+    const next = applyAppraisal(asked, neutral);
+    expect(before.u_ask).toBeGreaterThanOrEqual(55);
+    expect(asked.u_ask).toBeLessThan(25);
+    expect(next.u_ask).toBeGreaterThan(asked.u_ask);
+    expect(next.u_ask).toBeLessThan(before.u_ask);
+  });
+
+  it("όσο πιο δυνατή η ώθηση τόσο λιγότερο αντέχει τη σιωπή· δεν κυνηγά όποιον δεν απαντά", () => {
+    const v = initialValues();
+    const normal = initiativeDrive(v);
+    expect(initiativeDrive({ ...v, curiosity: 100, longing: 80 })).toBeGreaterThan(normal);
+    expect(initiativeDrive({ ...v, anger: 80, hurt: 60 })).toBeLessThan(25);
+    expect(initiativeWaitMin(90, 0)).toBeLessThan(initiativeWaitMin(50, 0));
+    expect(initiativeWaitMin(50, 1)).toBeGreaterThan(initiativeWaitMin(50, 0));
+    expect(initiativeWaitMin(50, 2)).toBeGreaterThanOrEqual(360);
+    expect(initiativeWaitMin(50, 4)).toBe(Infinity);
+    expect(initiativeWaitMin(20, 0)).toBe(Infinity);
   });
 });
