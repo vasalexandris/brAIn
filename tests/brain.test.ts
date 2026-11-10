@@ -11,6 +11,7 @@ import {
   initialValues,
   initiativeDrive,
   initiativeWaitMin,
+  replyTemperature,
 } from "@/brain/state";
 
 const insult = { perception: { p_hostility: 90 }, impulses: { anger: 80, liking: -50, trust: -50 } };
@@ -212,5 +213,48 @@ describe("χαρακτήρας, κούραση, βασικός τόνος", () =
     expect(good.pleasure).toBeGreaterThan(calm.pleasure);
     expect(bad.pleasure).toBeLessThan(calm.pleasure);
     expect(bad.activation).toBeGreaterThan(calm.activation);
+  });
+});
+
+describe("συγκράτηση, αυθορμητισμός, επιμονή, παράπονο", () => {
+  const provoke = { perception: { p_provocation: 80 }, impulses: { anger: 70 } };
+  const wound = { perception: { p_dismissal: 80 }, impulses: { hurt: 70, frustration: 50 } };
+  const kind = { perception: { p_kindness: 80 }, impulses: { joy: 60, liking: 50, trust: 50 } };
+
+  it("ο συγκρατημένος δεν αντιμιλά εύκολα· ο αυθόρμητος μιλά πιο απρόβλεπτα", () => {
+    const base = initialValues();
+    expect(applyAppraisal({ ...base, restraint: 95 }, provoke).u_confront).toBeLessThan(
+      applyAppraisal({ ...base, restraint: 10 }, provoke).u_confront,
+    );
+    expect(replyTemperature({ ...base, spontaneity: 95, restraint: 10 })).toBeGreaterThan(
+      replyTemperature({ ...base, spontaneity: 10, restraint: 95 }),
+    );
+    expect(replyTemperature(base)).toBeGreaterThan(0.7);
+    expect(replyTemperature({ ...base, spontaneity: 100, restraint: 0 })).toBeLessThanOrEqual(1.25);
+  });
+
+  it("ο επίμονος ξαναδοκιμάζει νωρίτερα, αλλά ούτε αυτός πάνω από δύο φορές", () => {
+    expect(initiativeWaitMin(60, 1, 90)).toBeLessThan(initiativeWaitMin(60, 1, 10));
+    expect(initiativeWaitMin(60, 0, 90)).toBe(initiativeWaitMin(60, 0, 10));
+    expect(initiativeWaitMin(60, 2, 100)).toBe(Infinity);
+  });
+
+  it("το παράπονο μαζεύεται, κρατά περισσότερο από την πίκρα, και δυσκολεύει τη συμφιλίωση", () => {
+    let v = initialValues();
+    for (let i = 0; i < 6; i++) v = applyAppraisal(v, wound);
+    expect(v.grievance).toBeGreaterThan(20);
+
+    const nextMorning = applyTime(v, 10 * 60, 10 * 60);
+    expect(nextMorning.hurt).toBeLessThan(1);
+    expect(nextMorning.grievance).toBeGreaterThan(v.grievance / 2);
+    expect(applyTime(v, 14 * 24 * 60, 14 * 24 * 60).grievance).toBeLessThan(1);
+
+    const clean: Record<string, number> = { ...nextMorning, grievance: 0 };
+    expect(applyAppraisal(nextMorning, kind).liking - nextMorning.liking).toBeLessThan(
+      applyAppraisal(clean, kind).liking - clean.liking,
+    );
+    expect(initiativeDrive(nextMorning)).toBeLessThan(initiativeDrive(clean));
+    // Όταν το πει, ξαλαφρώνει.
+    expect(applyExpression(nextMorning, { grievance: 100 }).grievance).toBeLessThan(nextMorning.grievance);
   });
 });
