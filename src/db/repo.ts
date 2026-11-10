@@ -117,6 +117,16 @@ export async function recentMessages(db: Db, userId: string, limit: number): Pro
     .reverse();
 }
 
+/** Πόσα μηνύματα του χρήστη, ή πόσα μηνύματα πρωτοβουλίας του εγκεφάλου, γράφτηκαν από τότε. */
+export async function countSince(db: Db, userId: string, kind: "user" | "proactive", since: Date): Promise<number> {
+  const filter = kind === "user" ? `role = 'user'` : `role = 'assistant' AND meta->>'proactive' = 'true'`;
+  const rows = await db.query(
+    `SELECT count(*)::int AS n FROM messages WHERE user_id = $1 AND created_at >= $2 AND ${filter}`,
+    [userId, since.toISOString()],
+  );
+  return rows[0].n;
+}
+
 const toMemory = (r: any): Memory => ({
   id: r.id,
   kind: r.kind as MemoryKind,

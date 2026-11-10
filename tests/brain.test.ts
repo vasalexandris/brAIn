@@ -164,8 +164,7 @@ describe("χρόνος, παρορμήσεις, πρωτοβουλία", () => {
     expect(initiativeDrive({ ...v, anger: 80, hurt: 60 })).toBeLessThan(25);
     expect(initiativeWaitMin(90, 0)).toBeLessThan(initiativeWaitMin(50, 0));
     expect(initiativeWaitMin(50, 1)).toBeGreaterThan(initiativeWaitMin(50, 0));
-    expect(initiativeWaitMin(50, 2)).toBeGreaterThanOrEqual(360);
-    expect(initiativeWaitMin(50, 4)).toBe(Infinity);
+    expect(initiativeWaitMin(100, 2)).toBe(Infinity);
     expect(initiativeWaitMin(20, 0)).toBe(Infinity);
   });
 });

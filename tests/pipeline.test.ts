@@ -65,9 +65,10 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     expect((await pulse({ db, llm, now: at(1) }, fresh)).message).toBeNull();
     const second = await pulse({ db, llm, now: at(first.nextInSec! / 60) }, fresh);
     expect(second.message).not.toBeNull();
-    // Δύο αναπάντητα: τώρα περιμένει ώρες.
+    // Δύο αναπάντητα: σωπαίνει, όσος καιρός κι αν περάσει.
+    expect(second.nextInSec).toBeNull();
     expect((await pulse({ db, llm, now: at(60) }, fresh)).message).toBeNull();
-    expect(second.nextInSec).toBeGreaterThanOrEqual(360 * 60);
+    expect((await pulse({ db, llm, now: at(5 * 24 * 60) }, fresh)).nextInSec).toBeNull();
 
     const msgs = await recentMessages(db, fresh.id, 10);
     expect(msgs.map((m) => m.role)).toEqual(["user", "assistant", "assistant", "assistant"]);
@@ -76,6 +77,29 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     const back = await processTurn({ db, llm, now: at(3 * 24 * 60) }, fresh, "Συγγνώμη που χάθηκα.");
     expect(back.values.presence).toBeGreaterThan(40);
     expect((await pulse({ db, llm, now: at(0.5) }, fresh)).nextInSec).toBeLessThan(3600);
+  });
+
+  it("ημερήσια όρια: το πολύ έξι πρωτοβουλίες και πεπερασμένα μηνύματα ανά 24 ώρες", async () => {
+    const chatty = await createUser(db, { email: "e@f.gr", name: "Λία", passwordHash: "x" });
+    let clock = new Date("2026-08-01T08:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    let sent = 0;
+    for (let i = 0; i < 10; i++) {
+      await processTurn({ db, llm, now: at(1) }, chatty, "Γεια!");
+      if ((await pulse({ db, llm, now: at(30) }, chatty)).message) sent++;
+    }
+    expect(sent).toBe(6);
+
+    const { DAILY_MESSAGE_LIMIT, DailyLimitError } = await import("@/brain/pipeline");
+    for (let i = 10; i < DAILY_MESSAGE_LIMIT; i++) {
+      await db.query(`INSERT INTO messages (id, user_id, role, content, created_at) VALUES ($1, $2, 'user', 'x', $3)`, [
+        `bulk-${i}`,
+        chatty.id,
+        at(0).toISOString(),
+      ]);
+    }
+    await expect(processTurn({ db, llm, now: at(1) }, chatty, "Κι άλλο")).rejects.toBeInstanceOf(DailyLimitError);
+    await expect(processTurn({ db, llm, now: at(25 * 60) }, chatty, "Καλημέρα")).resolves.toBeTruthy();
   });
 
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {
