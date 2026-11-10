@@ -58,7 +58,21 @@ export function decay(values: BrainValues, elapsedMin: number): BrainValues {
  * Πώς ο χαρακτήρας και η σχέση χρωματίζουν μια ώθηση πριν εφαρμοστεί.
  * Επιστρέφει πολλαπλασιαστή.
  */
+const POSITIVE = ["joy", "gratitude", "tenderness", "excitement", "amusement", "relief", "anticipation", "admiration"];
+const NEGATIVE = ["sadness", "fear", "frustration", "hurt", "loneliness", "guilt", "jealousy"];
+
 function modulation(key: string, impulse: number, v: BrainValues): number {
+  let m = specific(key, impulse, v);
+  if (impulse > 0 && DIMENSION_BY_KEY[key].category === "emotion") {
+    // Ο ευαίσθητος τα νιώθει όλα πιο έντονα· ο αισιόδοξος χαίρεται εύκολα και στενοχωριέται δύσκολα.
+    m *= 0.6 + (0.8 * v.sensitivity) / 100;
+    if (POSITIVE.includes(key)) m *= 0.7 + (0.6 * v.optimism) / 100;
+    if (NEGATIVE.includes(key)) m *= 1.3 - (0.6 * v.optimism) / 100;
+  }
+  return m;
+}
+
+function specific(key: string, impulse: number, v: BrainValues): number {
   const up = impulse > 0;
   switch (key) {
     case "anger":
@@ -80,8 +94,8 @@ function modulation(key: string, impulse: number, v: BrainValues): number {
     case "trust":
     case "liking":
     case "esteem":
-      // Η εμπιστοσύνη χάνεται πιο εύκολα απ' ό,τι κερδίζεται.
-      return up ? 1 : 1.6;
+      // Η εμπιστοσύνη χάνεται πιο εύκολα απ' ό,τι κερδίζεται — και ο δύσπιστος την κερδίζει ακόμη πιο αργά.
+      return up ? 1.3 - (0.75 * v.skepticism) / 100 : 1.6;
     default:
       return 1;
   }
@@ -114,6 +128,20 @@ const COUPLINGS: [from: string, to: string, weight: number][] = [
   ["wonder", "curiosity", 0.2],
   ["surprise", "curiosity", 0.15],
   ["pride", "confidence", 0.03],
+  ["excitement", "energy", 0.15],
+  ["excitement", "curiosity", 0.15],
+  ["amusement", "playfulness", 0.3],
+  ["amusement", "cheerfulness", 0.15],
+  ["admiration", "esteem", 0.06],
+  ["awe", "curiosity", 0.2],
+  ["awe", "meaning", 0.1],
+  ["relief", "calm", 0.3],
+  ["guilt", "confidence", -0.03],
+  ["guilt", "calm", -0.2],
+  ["jealousy", "calm", -0.2],
+  ["jealousy", "recognition", 0.2],
+  ["loneliness", "sociability", 0.2],
+  ["loneliness", "cheerfulness", -0.15],
 ];
 
 /** Εφαρμόζει την αντίληψη ενός μηνύματος του χρήστη πάνω στην κατάσταση. */
@@ -153,7 +181,7 @@ export function applyAppraisal(values: BrainValues, appraisal: Appraisal): Brain
 }
 
 /** Συναισθήματα που εκτονώνονται όταν εκφραστούν. */
-const VENTABLE = ["anger", "frustration", "hurt", "sadness", "fear", "embarrassment", "disgust", "surprise"];
+const VENTABLE = ["anger", "frustration", "hurt", "sadness", "fear", "embarrassment", "disgust", "surprise", "guilt", "jealousy"];
 const CATHARSIS = 0.35;
 
 /**
@@ -177,7 +205,7 @@ export function applyExpression(values: BrainValues, expressed: Record<string, n
     out.joy = round1(clamp(out.joy + 2 * n));
     out.boredom = round1(clamp(out.boredom - 3 * n));
   }
-  return out;
+  return refresh(out);
 }
 
 // ------------------------------------------------------------------ Χρόνος
@@ -195,17 +223,22 @@ export function applyTime(values: BrainValues, elapsedMin: number, silenceMin: n
     const pull = 0.3 + (0.7 * (out.liking + out.sociability)) / 200;
     const grown = 100 * (1 - Math.exp(-silenceMin / DAY_MIN)) * pull;
     out.longing = round1(clamp(Math.max(out.longing, grown)));
+    // Η μακριά σιωπή φέρνει και μοναξιά.
+    out.loneliness = round1(clamp(Math.max(out.loneliness, out.longing * 0.6)));
   }
-  return out;
+  return refresh(out);
 }
 
 /**
  * Ο συνομιλητής μόλις έγραψε: η κουβέντα "ζωντανεύει", και αν είχε λείψει,
  * η επιστροφή του φέρνει χαρά ανάλογη με τη συμπάθεια.
  */
-export function applyArrival(values: BrainValues): BrainValues {
+export function applyArrival(values: BrainValues, sessionMin = 0): BrainValues {
   const out: BrainValues = { ...values };
   out.presence = round1(clamp(out.presence + (100 - out.presence) * 0.5));
+  out.loneliness = round1(out.loneliness * 0.7);
+  // Μετά το πρώτο μισάωρο συνεχόμενης κουβέντας αρχίζει να κουράζεται· στις τρεις ώρες έχει εξαντληθεί.
+  out.fatigue = round1(clamp(Math.max(out.fatigue, ((sessionMin - 30) / 150) * 100)));
   if (out.longing > 10) {
     out.joy = round1(clamp(out.joy + out.longing * 0.3 * (out.liking / 100)));
     out.anticipation = round1(clamp(out.anticipation + out.longing * 0.15));
@@ -221,16 +254,19 @@ export function applyArrival(values: BrainValues): BrainValues {
  * Ο θυμός σπρώχνει προς την αντιπαράθεση, η πίκρα προς την απόσυρση, η περιέργεια προς την ερώτηση.
  */
 const URGE_RULES: Record<string, { bias?: number; from: [key: string, weight: number][] }> = {
-  u_ask: { from: [["curiosity", 0.5], ["thirst", 0.3], ["wonder", 0.3], ["anger", -0.4], ["boredom", -0.3]] },
+  u_ask: { from: [["curiosity", 0.5], ["thirst", 0.3], ["wonder", 0.3], ["anger", -0.4], ["boredom", -0.3], ["fatigue", -0.2]] },
+  u_explore: { from: [["thirst", 0.4], ["curiosity", 0.3], ["p_teaching", 0.3], ["meaning", 0.2], ["boredom", -0.4], ["fatigue", -0.3]] },
+  u_help: { from: [["competence", 0.3], ["empathy", 0.2], ["p_distress", 0.3], ["liking", 0.2], ["anger", -0.4]] },
+  u_praise: { from: [["admiration", 0.8], ["p_teaching", 0.1]] },
   u_share: { from: [["sociability", 0.4], ["trust", 0.3], ["familiarity", 0.3], ["joy", 0.2], ["fear", -0.3], ["hurt", -0.3]] },
   u_listen: { from: [["p_distress", 0.6], ["p_sincerity", 0.3], ["empathy", 0.25], ["anger", -0.3]] },
   u_comfort: { from: [["p_distress", 0.7], ["tenderness", 0.3], ["empathy", 0.1], ["anger", -0.4]] },
   u_tease: { from: [["playfulness", 0.6], ["p_humor", 0.3], ["familiarity", 0.2], ["anger", -0.5], ["sadness", -0.3], ["p_distress", -0.3]] },
   u_thank: { from: [["gratitude", 0.8], ["p_kindness", 0.2]] },
   u_apologize: { from: [["embarrassment", 0.9]] },
-  u_confront: { from: [["anger", 0.7], ["frustration", 0.3], ["p_provocation", 0.3], ["audacity", 0.15], ["patience", -0.2]] },
-  u_insist: { bias: -25, from: [["stubbornness", 0.4], ["p_provocation", 0.4], ["confidence", 0.2]] },
-  u_withdraw: { from: [["hurt", 0.5], ["fear", 0.4], ["boredom", 0.3], ["sadness", 0.3], ["anger", 0.2], ["sociability", -0.15]] },
+  u_confront: { from: [["anger", 0.7], ["frustration", 0.3], ["p_provocation", 0.3], ["p_dismissal", 0.2], ["audacity", 0.15], ["patience", -0.2]] },
+  u_insist: { bias: -25, from: [["stubbornness", 0.4], ["p_provocation", 0.4], ["p_disagreement", 0.3], ["confidence", 0.2]] },
+  u_withdraw: { from: [["hurt", 0.5], ["fear", 0.4], ["boredom", 0.3], ["sadness", 0.3], ["anger", 0.2], ["fatigue", 0.3], ["sociability", -0.15]] },
 };
 
 export function urgeTarget(key: string, v: BrainValues): number {
@@ -242,7 +278,16 @@ export function urgeTarget(key: string, v: BrainValues): number {
 export function updateUrges(values: BrainValues): BrainValues {
   const out: BrainValues = { ...values };
   for (const key of URGE_KEYS) out[key] = round1(out[key] * 0.3 + urgeTarget(key, values) * 0.7);
-  return out;
+  return refresh(out);
+}
+
+/** Ο βασικός τόνος είναι πάντα σύνοψη των υπολοίπων. */
+function refresh(values: BrainValues): BrainValues {
+  return {
+    ...values,
+    pleasure: round1(50 + 50 * valence(values)),
+    activation: round1(100 * arousal(values)),
+  };
 }
 
 /** Μια παρόρμηση που έγινε πράξη ικανοποιείται — και χρειάζεται χρόνο να ξαναχτιστεί. */
@@ -287,7 +332,11 @@ export function arousal(values: BrainValues): number {
 
 /** Συνολικό πρόσημο της στιγμής, −1 (σκοτεινή) … +1 (φωτεινή). */
 export function valence(values: BrainValues): number {
-  const pos = values.joy + values.gratitude + values.tenderness + values.cheerfulness;
-  const neg = values.anger + values.sadness + values.fear + values.hurt + values.frustration + values.disgust;
-  return clamp((pos - 100 - neg) / 150, -1, 1);
+  const pos =
+    values.joy + values.gratitude + values.tenderness + values.cheerfulness +
+    values.excitement + values.amusement + values.relief;
+  const neg =
+    values.anger + values.sadness + values.fear + values.hurt + values.frustration + values.disgust +
+    values.guilt + values.jealousy + values.loneliness;
+  return clamp((pos - 120 - neg) / 150, -1, 1);
 }

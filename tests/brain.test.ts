@@ -168,3 +168,49 @@ describe("χρόνος, παρορμήσεις, πρωτοβουλία", () => {
     expect(initiativeWaitMin(20, 0)).toBe(Infinity);
   });
 });
+
+describe("χαρακτήρας, κούραση, βασικός τόνος", () => {
+  const praise = { perception: { p_praise: 80 }, impulses: { joy: 60, trust: 50 } };
+  const blow = { perception: { p_dismissal: 80 }, impulses: { sadness: 60, hurt: 60 } };
+
+  it("ο ευαίσθητος τα νιώθει πιο έντονα· ο αισιόδοξος στενοχωριέται λιγότερο", () => {
+    const base = initialValues();
+    expect(applyAppraisal({ ...base, sensitivity: 90 }, blow).hurt).toBeGreaterThan(
+      applyAppraisal({ ...base, sensitivity: 10 }, blow).hurt,
+    );
+    expect(applyAppraisal({ ...base, optimism: 95 }, blow).sadness).toBeLessThan(
+      applyAppraisal({ ...base, optimism: 5 }, blow).sadness,
+    );
+    expect(applyAppraisal({ ...base, optimism: 95 }, praise).joy).toBeGreaterThan(
+      applyAppraisal({ ...base, optimism: 5 }, praise).joy,
+    );
+  });
+
+  it("ο δύσπιστος αργεί να εμπιστευτεί", () => {
+    const base = initialValues();
+    expect(applyAppraisal({ ...base, skepticism: 90 }, praise).trust).toBeLessThan(
+      applyAppraisal({ ...base, skepticism: 10 }, praise).trust,
+    );
+  });
+
+  it("η πολύωρη κουβέντα κουράζει και σπρώχνει προς την απόσυρση· το διάλειμμα ξεκουράζει", () => {
+    const fresh = applyAppraisal(applyArrival(initialValues(), 10), { perception: {}, impulses: {} });
+    const tired = applyAppraisal(applyArrival(initialValues(), 170), { perception: {}, impulses: {} });
+    expect(fresh.fatigue).toBe(0);
+    expect(tired.fatigue).toBeGreaterThan(80);
+    expect(tired.u_withdraw).toBeGreaterThan(fresh.u_withdraw);
+    expect(tired.u_ask).toBeLessThan(fresh.u_ask);
+    expect(applyTime(tired, 180, 180).fatigue).toBeLessThan(10);
+  });
+
+  it("ο βασικός τόνος συνοψίζει τη στιγμή: ευχάριστη ή δυσάρεστη, ήρεμη ή φορτισμένη", () => {
+    const calm = applyAppraisal(initialValues(), { perception: {}, impulses: {} });
+    const good = applyAppraisal(initialValues(), praise);
+    const bad = applyAppraisal(applyAppraisal(initialValues(), blow), blow);
+    expect(calm.pleasure).toBeGreaterThan(45);
+    expect(calm.pleasure).toBeLessThan(60);
+    expect(good.pleasure).toBeGreaterThan(calm.pleasure);
+    expect(bad.pleasure).toBeLessThan(calm.pleasure);
+    expect(bad.activation).toBeGreaterThan(calm.activation);
+  });
+});

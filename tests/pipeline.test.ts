@@ -102,6 +102,27 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     await expect(processTurn({ db, llm, now: at(25 * 60) }, chatty, "Καλημέρα")).resolves.toBeTruthy();
   });
 
+  it("βάζει δικούς της στόχους, τους κρατά, και τους κλείνει όταν πάρει την απάντηση", async () => {
+    const u = await createUser(db, { email: "g@h.gr", name: "Ίρις", passwordHash: "x" });
+    let clock = new Date("2026-09-01T10:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+
+    const first = await processTurn({ db, llm, now: at(1) }, u, "Αγαπώ την αστρονομία.");
+    expect(first.debug.goals).toEqual(["Θέλω να μάθω γιατί αγαπά αστρονομία."]);
+    expect(first.debug.selfImage).toBe("");
+
+    // Τρεις μέρες μετά ο στόχος είναι ακόμη εκεί, και δεν μπερδεύεται με τις απλές αναμνήσεις.
+    const later = await processTurn({ db, llm, now: at(3 * 24 * 60) }, u, "Καλημέρα!");
+    expect(later.debug.goals).toHaveLength(1);
+    expect(later.debug.recalled.join(" ")).not.toContain("Θέλω να μάθω");
+
+    const done = await processTurn({ db, llm, now: at(1) }, u, "Επειδή με κάνει να νιώθω μικρός.");
+    expect(done.debug.goals).toEqual([]);
+    expect(done.debug.selfImage).toContain("Μου αρέσει");
+    expect((await listMemories(db, u.id)).filter((m) => m.kind === "goal")).toHaveLength(0);
+    expect((await loadBrainState(db, u.id)).selfImage).toContain("Μου αρέσει");
+  });
+
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {
     const broken: LlmProvider = {
       name: "broken",

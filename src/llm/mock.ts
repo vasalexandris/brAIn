@@ -73,7 +73,15 @@ export class MockProvider implements LlmProvider {
     if (name) {
       memories.push({ kind: "user_fact", content: `Τον συνομιλητή μου τον λένε ${name[1]}.`, importance: 80, valence: 20 });
     }
+    // Στόχος: γεννιέται όταν ο συνομιλητής πει ότι αγαπά κάτι, και κλείνει όταν εξηγήσει το γιατί.
+    const loves = /αγαπώ (?:την |τον |το |τη )?([^\s.,!;]+)/i.exec(user);
+    if (loves) {
+      memories.push({ kind: "goal", content: `Θέλω να μάθω γιατί αγαπά ${loves[1]}.`, importance: 60, valence: 30 });
+    }
+    const explained = strip(user).includes("επειδη") && prompt.includes("1. Θέλω να μάθω");
     return {
+      resolved_goals: explained ? [1] : [],
+      self_image: explained ? "Μου αρέσει να καταλαβαίνω γιατί οι άνθρωποι αγαπούν αυτά που αγαπούν." : "",
       expressed: { anger: has(reply, ["σταματα", "δεν μου αρεσει"]) ? 80 : 0 },
       acts: reply.includes(";") || reply.includes("περισσοτερα") ? ["u_ask"] : [],
       memories,
