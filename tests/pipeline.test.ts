@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { processTurn, pulse, resolveSearch } from "@/brain/pipeline";
+import { countQuestions, processTurn, pulse, resolveSearch } from "@/brain/pipeline";
 import { createPgliteDb, type Db } from "@/db";
 import { createUser, listMemories, loadBrainState, recentMessages } from "@/db/repo";
 import { MockProvider } from "@/llm/mock";
@@ -199,6 +199,65 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     expect(next.debug.recalled.join(" ")).not.toContain("Την επόμενη φορά");
     // Όρια στο prompt: υπαρξιακή ανησυχία χωρίς πίεση προς τον συνομιλητή.
     expect(seen).toContain("δεν του ζητάς να μη φύγει");
+  });
+
+  it("μετρά η ίδια τις ερωτήσεις της: μετά από ερώτηση, η επόμενη απάντηση δεν επιτρέπεται να ρωτήσει", async () => {
+    expect(countQuestions("Γιατί; Πώς? Έτσι;")).toBe(3);
+    expect(countQuestions("Καλά είμαι.")).toBe(0);
+
+    const u = await createUser(db, { email: "m@n.gr", name: "Κώστας", passwordHash: "x" });
+    let clock = new Date("2026-10-20T10:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    const systems: string[] = [];
+    let reply = "";
+    // Ο αναστοχασμός εδώ δεν αναφέρει ποτέ πράξεις — όπως ένα μοντέλο που "ξεχνά" να το πει.
+    const forgetful: LlmProvider = {
+      name: "forgetful",
+      embed: llm.embed.bind(llm),
+      generateJson: async () => ({ perception: {}, impulses: {}, acts: [] }),
+      generateText: async (req) => {
+        systems.push(req.system);
+        return reply;
+      },
+    };
+
+    reply = "Αλήθεια; Γιατί το λες; Πώς το ξέρεις; Και μετά;";
+    const first = await processTurn({ db, llm: forgetful, now: at(1) }, u, "Γεια");
+    expect(systems[0]).toContain("Μπορείς να κάνεις ΜΙΑ ερώτηση");
+    expect(first.values.u_ask).toBeLessThan(25);
+    expect(first.values.fixation).toBeGreaterThan(20);
+
+    reply = "Μου αρέσει αυτό.";
+    const second = await processTurn({ db, llm: forgetful, now: at(1) }, u, "Ωραία");
+    expect(systems[1]).toContain("ΚΑΜΙΑ ερώτηση");
+    expect(systems[1]).toContain("Wikipedia");
+    // Δεν ρώτησε: η όρεξη ξαναχτίζεται και στον επόμενο γύρο επιτρέπεται πάλι.
+    await processTurn({ db, llm: forgetful, now: at(1) }, u, "Ναι");
+    expect(systems[2]).toContain("Μπορείς να κάνεις ΜΙΑ ερώτηση");
+    expect(second.values.u_ask).toBeGreaterThan(first.values.u_ask);
+  });
+
+  it("όταν ο συνομιλητής ζητά ο ίδιος να ψάξει, η κάρτα εμφανίζεται παρά τους φραγμούς", async () => {
+    const u = await createUser(db, { email: "o@p.gr", name: "Ελένη", passwordHash: "x" });
+    let clock = new Date("2026-10-25T10:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    const lookup = async () => ({ titles: ["Τίτλος"], text: "## Τίτλος\nΚείμενο." });
+
+    // Μια αυθόρμητη πρόταση, που απορρίπτεται: κανονικά ακολουθούν δέκα λεπτά αναμονής.
+    const own = await processTurn({ db, llm, now: at(1) }, u, "Τι είναι τα κβάζαρ;");
+    await resolveSearch({ db, llm, lookup, now: at(1) }, u, own.search!.id, false);
+    expect((await processTurn({ db, llm, now: at(1) }, u, "Και τι είναι οι πάλσαρ;")).search).toBeNull();
+
+    // Αν όμως το ζητήσει ο ίδιος, εμφανίζεται αμέσως — ακόμη και με την εμμονή στο ταβάνι.
+    const state = await loadBrainState(db, u.id);
+    await db.query(`UPDATE brain_states SET dims = $2::text::jsonb WHERE user_id = $1`, [
+      u.id,
+      JSON.stringify({ ...state.values, fixation: 95, u_explore: 0 }),
+    ]);
+    const asked = await processTurn({ db, llm, now: at(1) }, u, "Διάβασες τις ειδήσεις σήμερα;");
+    expect(asked.search).toMatchObject({ source: "news", sourceLabel: "ειδήσεις" });
+    // Το ημερήσιο όριο και η μία εκκρεμότητα εξακολουθούν να ισχύουν.
+    expect((await processTurn({ db, llm, now: at(1) }, u, "Δες τις ειδήσεις!")).search).toBeNull();
   });
 
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {
