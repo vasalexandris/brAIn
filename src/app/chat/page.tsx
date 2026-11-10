@@ -20,6 +20,7 @@ export default async function ChatPage() {
       initialMessages={messages.map((m) => ({ role: m.role, content: m.content }))}
       initialValues={state.values}
       initialImpression={state.impression}
+      initialSelfImage={state.selfImage}
       dimensions={DIMENSIONS.map(({ key, label, category }) => ({ key, label, category }))}
       categories={CATEGORY_LABELS}
       admin={isAdmin(user)}

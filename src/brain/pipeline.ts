@@ -10,11 +10,14 @@ import * as repo from "@/db/repo";
 import type { LlmProvider } from "@/llm/types";
 import { INNER_KEYS, PERCEPTION_KEYS, URGE_KEYS } from "./dimensions";
 import {
+  FORGOTTEN_BELOW,
   MIN_IMPORTANCE,
   SAME_MEMORY_SIMILARITY,
   cosine,
   encodeImportance,
   recall,
+  strength,
+  type Memory,
   type MemoryKind,
 } from "./memory";
 import {
@@ -54,7 +57,18 @@ export class DailyLimitError extends Error {}
 
 /** Πόσα πρόσφατα μηνύματα μένουν στην "άμεση" μνήμη εργασίας. */
 const WORKING_MEMORY = 16;
-const MEMORY_KINDS: MemoryKind[] = ["user_fact", "episode", "knowledge", "opinion"];
+const MEMORY_KINDS: MemoryKind[] = ["user_fact", "episode", "knowledge", "opinion", "self", "goal"];
+/** Πόσους στόχους έχει "στο μυαλό" της ταυτόχρονα. */
+const ACTIVE_GOALS = 3;
+
+/** Χωρίζει τη μνήμη σε ενεργούς στόχους (οι ισχυρότεροι που δεν έχουν ξεχαστεί) και όλα τα υπόλοιπα. */
+function splitGoals(memories: Memory[], now: Date) {
+  const goals = memories
+    .filter((m) => m.kind === "goal" && strength(m, now) >= FORGOTTEN_BELOW)
+    .sort((a, b) => b.importance * strength(b, now) - a.importance * strength(a, now))
+    .slice(0, ACTIVE_GOALS);
+  return { goals, rest: memories.filter((m) => m.kind !== "goal") };
+}
 
 export interface TurnResult {
   reply: string;
@@ -64,6 +78,8 @@ export interface TurnResult {
     recalled: string[];
     stored: string[];
     impression: string;
+    selfImage: string;
+    goals: string[];
   };
 }
 
@@ -93,7 +109,9 @@ interface Reflection {
   expressed: Record<string, number>;
   acts: string[];
   memories: { kind: MemoryKind; content: string; importance: number; valence: number }[];
+  resolvedGoals: number[];
   impression: string;
+  selfImage: string;
 }
 
 function parseReflection(raw: unknown): Reflection {
@@ -112,7 +130,9 @@ function parseReflection(raw: unknown): Reflection {
     expressed: numbers(r.expressed, INNER_KEYS),
     acts: (Array.isArray(r.acts) ? r.acts : []).filter((a): a is string => URGE_KEYS.includes(a as string)),
     memories,
+    resolvedGoals: (Array.isArray(r.resolved_goals) ? r.resolved_goals : []).map(Number).filter(Number.isInteger),
     impression: typeof r.impression === "string" ? r.impression.trim().slice(0, 600) : "",
+    selfImage: typeof r.self_image === "string" ? r.self_image.trim().slice(0, 800) : "",
   };
 }
 
@@ -154,7 +174,7 @@ export async function processTurn(
   // 1. Ο χρόνος: ό,τι ένιωθε καταλαγιάζει, η σιωπή αφήνει έλλειψη, και η επιστροφή του κάτι σημαίνει.
   const time = senseTime(stored, now);
   const elapsedMin = state.updatedAt ? minutesBetween(state.updatedAt, now) : 1;
-  let values = applyArrival(applyTime(state.values, elapsedMin, time.silenceMin));
+  let values = applyArrival(applyTime(state.values, elapsedMin, time.silenceMin), time.sessionMin);
 
   // 2. Αντίληψη (και, παράλληλα, το "αποτύπωμα" του μηνύματος για την ανάκληση).
   const [appraisal, cue] = await Promise.all([
@@ -177,11 +197,22 @@ export async function processTurn(
 
   // 3. Ανάκληση: τι του θυμίζει αυτό, στη διάθεση που βρίσκεται.
   const memories = await repo.listMemories(db, user.id);
-  const recalled = recall(memories, cue, valence(values), now);
+  const { goals, rest } = splitGoals(memories, now);
+  const goalTexts = goals.map((g) => g.content);
+  const recalled = recall(rest, cue, valence(values), now);
 
   // 4. Απόκριση. Αν αποτύχει, ο γύρος ακυρώνεται και δεν αποθηκεύεται τίποτα.
   const reply = await llm.generateText({
-    system: respondSystem({ values, impression: state.impression, recalled, userName: user.name, now, time }),
+    system: respondSystem({
+      values,
+      impression: state.impression,
+      selfImage: state.selfImage,
+      goals: goalTexts,
+      recalled,
+      userName: user.name,
+      now,
+      time,
+    }),
     messages: [...history, { role: "user", content: message }],
     temperature: 0.9,
   });
@@ -190,12 +221,19 @@ export async function processTurn(
   const reflection = await llm
     .generateJson({
       system: REFLECT_SYSTEM,
-      prompt: reflectPrompt({ values, impression: state.impression, message, reply }),
+      prompt: reflectPrompt({
+        values,
+        impression: state.impression,
+        selfImage: state.selfImage,
+        goals: goalTexts,
+        message,
+        reply,
+      }),
     })
     .then(parseReflection)
     .catch((err): Reflection => {
       console.error("[brAIn] ο αναστοχασμός απέτυχε:", err);
-      return { expressed: {}, acts: [], memories: [], impression: "" };
+      return { expressed: {}, acts: [], memories: [], resolvedGoals: [], impression: "", selfImage: "" };
     });
 
   // 6. Εγγραφή στη μνήμη — μόνο όσων ξεπερνούν το κατώφλι, με βάρος τη φόρτιση της στιγμής.
@@ -206,7 +244,9 @@ export async function processTurn(
     const importance = encodeImportance(m.importance, charge);
     if (importance < MIN_IMPORTANCE) continue;
     const embedding = await llm.embed(m.content).catch(() => [] as number[]);
-    const twin = memories.find((old) => cosine(old.embedding, embedding) >= SAME_MEMORY_SIMILARITY);
+    const twin = memories.find(
+      (old) => old.kind === m.kind && cosine(old.embedding, embedding) >= SAME_MEMORY_SIMILARITY,
+    );
     if (twin) {
       await repo.reviseMemory(
         db,
@@ -225,14 +265,22 @@ export async function processTurn(
     recalled.slice(0, 3).map((r) => r.memory.id),
     now,
   );
+  // Στόχοι που εκπληρώθηκαν φεύγουν· η ικανοποίηση μένει ως χαρά.
+  const resolved = reflection.resolvedGoals.map((n) => goals[n - 1]).filter(Boolean);
+  await repo.deleteMemories(
+    db,
+    resolved.map((g) => g.id),
+  );
+  if (resolved.length) values = { ...values, joy: clamp(values.joy + 6), pride: clamp(values.pride + 4) };
 
   // 7. Κάθαρση και αποθήκευση.
   values = applyActs(applyExpression(values, reflection.expressed, learned), reflection.acts);
   const impression = reflection.impression || state.impression;
+  const selfImage = reflection.selfImage || state.selfImage;
 
   await repo.addMessage(db, user.id, "user", message, { appraisal }, now);
   await repo.addMessage(db, user.id, "assistant", reply, { values, expressed: reflection.expressed }, new Date(now.getTime() + 1));
-  await repo.saveBrainState(db, user.id, { values, impression, turnCount: state.turnCount + 1, updatedAt: now }, now);
+  await repo.saveBrainState(db, user.id, { values, impression, selfImage, turnCount: state.turnCount + 1, updatedAt: now }, now);
 
   return {
     reply,
@@ -242,6 +290,11 @@ export async function processTurn(
       recalled: recalled.map((r) => r.memory.content),
       stored: storedNow,
       impression,
+      selfImage,
+      goals: [
+        ...goalTexts.filter((g) => !resolved.some((r) => r.content === g)),
+        ...reflection.memories.filter((m) => m.kind === "goal" && storedNow.includes(m.content)).map((m) => m.content),
+      ],
     },
   };
 }
@@ -294,10 +347,20 @@ export async function pulse(
   }
 
   const memories = await repo.listMemories(db, user.id);
-  const recalled = recall(memories, [], valence(values), now, 4);
+  const { goals, rest } = splitGoals(memories, now);
+  const recalled = recall(rest, [], valence(values), now, 4);
   const message = await llm.generateText({
     system:
-      respondSystem({ values, impression: state.impression, recalled, userName: user.name, now, time }) +
+      respondSystem({
+        values,
+        impression: state.impression,
+        selfImage: state.selfImage,
+        goals: goals.map((g) => g.content),
+        recalled,
+        userName: user.name,
+        now,
+        time,
+      }) +
       initiativeBlock(quietMin, unanswered),
     messages: [...stored.map((m) => ({ role: m.role, content: m.content })), { role: "user", content: silenceTurn(quietMin) }],
     temperature: 1,

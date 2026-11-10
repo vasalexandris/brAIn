@@ -18,6 +18,7 @@ export type UserStatus = "pending" | "approved" | "rejected";
 export interface BrainState {
   values: BrainValues;
   impression: string;
+  selfImage: string;
   turnCount: number;
   updatedAt: Date | null;
 }
@@ -71,11 +72,12 @@ export async function setUserStatus(db: Db, id: string, status: UserStatus): Pro
 
 export async function loadBrainState(db: Db, userId: string): Promise<BrainState> {
   const rows = await db.query(`SELECT * FROM brain_states WHERE user_id = $1`, [userId]);
-  if (!rows.length) return { values: normalizeValues(null), impression: "", turnCount: 0, updatedAt: null };
+  if (!rows.length) return { values: normalizeValues(null), impression: "", selfImage: "", turnCount: 0, updatedAt: null };
   const r = rows[0];
   return {
     values: normalizeValues(r.dims),
     impression: r.impression,
+    selfImage: r.self_image,
     turnCount: r.turn_count,
     updatedAt: new Date(r.updated_at),
   };
@@ -83,12 +85,12 @@ export async function loadBrainState(db: Db, userId: string): Promise<BrainState
 
 export async function saveBrainState(db: Db, userId: string, s: BrainState, now: Date): Promise<void> {
   await db.query(
-    `INSERT INTO brain_states (user_id, dims, impression, turn_count, updated_at)
-     VALUES ($1, $2::text::jsonb, $3, $4, $5)
+    `INSERT INTO brain_states (user_id, dims, impression, turn_count, updated_at, self_image)
+     VALUES ($1, $2::text::jsonb, $3, $4, $5, $6)
      ON CONFLICT (user_id) DO UPDATE
-       SET dims = EXCLUDED.dims, impression = EXCLUDED.impression,
+       SET dims = EXCLUDED.dims, impression = EXCLUDED.impression, self_image = EXCLUDED.self_image,
            turn_count = EXCLUDED.turn_count, updated_at = EXCLUDED.updated_at`,
-    [userId, JSON.stringify(s.values), s.impression, s.turnCount, now.toISOString()],
+    [userId, JSON.stringify(s.values), s.impression, s.turnCount, now.toISOString(), s.selfImage],
   );
 }
 
@@ -168,6 +170,10 @@ export async function reviseMemory(
             recall_count = recall_count + 1, last_recalled_at = $6 WHERE id = $1`,
     [id, m.content, m.importance, m.valence, JSON.stringify(m.embedding), now.toISOString()],
   );
+}
+
+export async function deleteMemories(db: Db, ids: string[]): Promise<void> {
+  for (const id of ids) await db.query(`DELETE FROM memories WHERE id = $1`, [id]);
 }
 
 /** Ό,τι ανακαλείται, δυναμώνει. */

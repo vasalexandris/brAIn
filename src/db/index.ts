@@ -32,6 +32,9 @@ CREATE TABLE IF NOT EXISTS brain_states (
   updated_at timestamptz NOT NULL
 );
 
+-- Η εικόνα του εγκεφάλου για τον εαυτό του: ποιος είναι, τι του αρέσει, τι τον χαλάει.
+ALTER TABLE brain_states ADD COLUMN IF NOT EXISTS self_image text NOT NULL DEFAULT '';
+
 -- Όλη η συζήτηση. Στο meta κρατιέται η κατάσταση του εγκεφάλου μετά από κάθε μήνυμα.
 CREATE TABLE IF NOT EXISTS messages (
   id         text PRIMARY KEY,

@@ -11,20 +11,30 @@ interface Debug {
   recalled: string[];
   stored: string[];
   impression: string;
+  selfImage: string;
+  goals: string[];
 }
 interface Props {
   initialMessages: Msg[];
   initialValues: Record<string, number>;
   initialImpression: string;
+  initialSelfImage: string;
   dimensions: { key: string; label: string; category: string }[];
   categories: Record<string, string>;
   admin: boolean;
 }
 
-export function Chat({ initialMessages, initialValues, initialImpression, dimensions, categories, admin }: Props) {
+export function Chat({ initialMessages, initialValues, initialImpression, initialSelfImage, dimensions, categories, admin }: Props) {
   const [messages, setMessages] = useState(initialMessages);
   const [values, setValues] = useState(initialValues);
-  const [debug, setDebug] = useState<Debug>({ note: "", recalled: [], stored: [], impression: initialImpression });
+  const [debug, setDebug] = useState<Debug>({
+    note: "",
+    recalled: [],
+    stored: [],
+    impression: initialImpression,
+    selfImage: initialSelfImage,
+    goals: [],
+  });
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -176,6 +186,10 @@ export function Chat({ initialMessages, initialValues, initialImpression, dimens
           <p>{debug.note || "—"}</p>
           <h4>Εντύπωση για σένα</h4>
           <p>{debug.impression || "—"}</p>
+          <h4>Πώς βλέπει τον εαυτό της</h4>
+          <p>{debug.selfImage || "—"}</p>
+          <h4>Οι στόχοι της</h4>
+          {debug.goals.length ? <ul>{debug.goals.map((r, i) => <li key={i}>{r}</li>)}</ul> : <p>—</p>}
           <h4>Τι της ήρθε στο μυαλό</h4>
           {debug.recalled.length ? <ul>{debug.recalled.map((r, i) => <li key={i}>{r}</li>)}</ul> : <p>—</p>}
           <h4>Τι κράτησε στη μνήμη</h4>
