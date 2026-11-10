@@ -25,6 +25,8 @@ export class MockProvider implements LlmProvider {
   async generateText(req: { system: string; messages: ChatMessage[] }): Promise<string> {
     const last = req.messages[req.messages.length - 1]?.content ?? "";
     if (req.system.includes("ΠΡΩΤΟΒΟΥΛΙΑ")) return "Κάτι σκεφτόμουν όση ώρα έλειπες… τι κάνεις τώρα;";
+    const topic = /ψάξε για ([^.;!?]+)/i.exec(last);
+    if (topic) return `Θα ήθελα να το δω.\n[ΨΑΞΕ wikipedia: ${topic[1].trim()}]`;
     const angry = /θυμός: (\d+)/.exec(req.system);
     const level = angry ? Number(angry[1]) : 0;
     if (level >= 40) return "Δεν μου αρέσει καθόλου ο τρόπος που μου μιλάς. Σταμάτα.";

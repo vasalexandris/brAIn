@@ -20,7 +20,7 @@ import {
   type Memory,
   type MemoryKind,
 } from "./memory";
-import { SOURCE_LABELS, lookup as defaultLookup, type Lookup, type Source } from "./world";
+import { HEADLINES_QUERY, SOURCES, SOURCE_LABELS, lookup as defaultLookup, type Lookup, type Source } from "./world";
 import {
   PERCEIVE_SYSTEM,
   REFLECT_SYSTEM,
@@ -154,8 +154,47 @@ interface Reflection {
   resolvedGoals: number[];
   impression: string;
   selfImage: string;
-  search: { source: Source; query: string; committed: boolean } | null;
+  search: (SearchRequest & { committed: boolean }) | null;
 }
+
+type SearchRequest = { source: Source; query: string };
+
+const MARKER = /\[\s*ΨΑΞΕ\s+(ειδήσεις|wikipedia)\s*(?::\s*([^\]]*))?\]/giu;
+
+/**
+ * Η απάντηση μπορεί να κλείνει με μια γραμμή-αίτημα, π.χ. «[ΨΑΞΕ wikipedia: κβάζαρ]».
+ * Έτσι αυτό που λέει («θα ήθελα να το ψάξω») και η κάρτα που βλέπει ο συνομιλητής προέρχονται
+ * από την ίδια απόφαση. Η γραμμή αφαιρείται από το κείμενο που εμφανίζεται.
+ */
+export function extractSearchMarker(reply: string): { text: string; request: SearchRequest | null } {
+  let request: SearchRequest | null = null;
+  const text = reply
+    .replace(MARKER, (_, kind: string, topic: string | undefined) => {
+      const query = (topic ?? "").trim().slice(0, 120);
+      if (!request) {
+        if (kind.toLowerCase() === "wikipedia") {
+          if (query) request = { source: "wikipedia", query };
+        } else {
+          request = query ? { source: "news", query } : { source: "headlines", query: HEADLINES_QUERY };
+        }
+      }
+      return "";
+    })
+    .replace(/[ \t]+\n/g, "\n")
+    .trim();
+  return { text, request };
+}
+
+const plain = (s: string) =>
+  s
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+/** Ο συνομιλητής ρωτά για την επικαιρότητα· δεν χρειάζεται μοντέλο για να το καταλάβουμε. */
+const NEWS_INTENT = /ειδησ|επικαιροτητ|τι (εγινε|γινεται|συμβαινει|συνεβη|παιζει).{0,40}(κοσμο|σημερα|χωρα|ελλαδα)/;
+/** Ο συνομιλητής ζητά ρητά αναζήτηση. */
+const SEARCH_INTENT = /ψαξε|ψαξεις|αναζητησ|wikipedia|βικιπαιδ|γκουγκλ|google/;
 
 /** Πόσες ερωτήσεις έχει ένα κείμενο (ελληνικό ή λατινικό ερωτηματικό). */
 export function countQuestions(text: string): number {
@@ -184,7 +223,7 @@ function parseReflection(raw: unknown): Reflection {
     search:
       isRecord(r.search) && typeof r.search.query === "string" && r.search.query.trim()
         ? {
-            source: r.search.source === "news" ? "news" : "wikipedia",
+            source: SOURCES.includes(r.search.source as Source) ? (r.search.source as Source) : "wikipedia",
             query: r.search.query.trim().slice(0, 120),
             committed: r.search.committed === true,
           }
@@ -258,7 +297,7 @@ export async function processTurn(
   const recalled = recall(rest, cue, valence(values), now);
 
   // 4. Απόκριση. Αν αποτύχει, ο γύρος ακυρώνεται και δεν αποθηκεύεται τίποτα.
-  const reply = await llm.generateText({
+  const raw = await llm.generateText({
     system: respondSystem({
       values,
       impression: state.impression,
@@ -273,6 +312,8 @@ export async function processTurn(
     messages: [...history, { role: "user", content: message }],
     temperature: replyTemperature(values),
   });
+  const marked = extractSearchMarker(raw);
+  const reply = marked.text || "Θα ήθελα να το ψάξω.";
 
   // 5. Αναστοχασμός: τι εξέφρασα, τι αξίζει να θυμάμαι, άλλαξε η γνώμη μου;
   const reflection = await llm
@@ -353,20 +394,32 @@ export async function processTurn(
 
   // 8. Θέλει να ψάξει κάτι; Μόνο αν έχει όρεξη, δεν ζήτησε πρόσφατα, και δεν ξεπέρασε το ημερήσιο όριο.
   let search: SearchProposal | null = null;
-  // Όταν το ζήτησε ο συνομιλητής ή το είπε η ίδια στην απάντησή της, οι φραγμοί όρεξης, εμμονής
-  // και αναμονής δεν ισχύουν: θα ήταν παράλογο να πει «να ψάξω;» και να μη φανεί η επιλογή.
-  const wanted =
+  // Τρεις πηγές αιτήματος, με σειρά αξιοπιστίας: (α) η γραμμή-αίτημα στην ίδια την απάντηση,
+  // (β) η κρίση του αναστοχασμού, (γ) αν ο συνομιλητής ρώτησε για την επικαιρότητα και καμία από
+  // τις δύο δεν το έπιασε, προτείνονται οι τίτλοι της ημέρας.
+  const said = plain(message);
+  const userAsked = NEWS_INTENT.test(said) || SEARCH_INTENT.test(said);
+  const spontaneous =
     reflection.search &&
-    (reflection.search.committed ||
-      (values.u_explore >= SEARCH_MIN_URGE && values.fixation < SEARCH_MAX_FIXATION));
-  if (reflection.search && wanted) {
+    (reflection.search.committed || values.u_explore >= SEARCH_MIN_URGE) &&
+    reflection.search;
+  const request: SearchRequest | null =
+    marked.request ??
+    (spontaneous || null) ??
+    (NEWS_INTENT.test(said) ? { source: "headlines", query: HEADLINES_QUERY } : null);
+
+  if (request) {
     const last = await repo.latestSearch(db, user.id);
-    const recently =
-      last &&
-      (last.status === "pending" ||
-        (!reflection.search.committed && minutesBetween(last.createdAt, now) < SEARCH_COOLDOWN_MIN));
-    if (!recently && (await repo.countSearchesSince(db, user.id, dayAgo(now))) < DAILY_SEARCH_LIMIT) {
-      search = toProposal(await repo.createSearch(db, user.id, reflection.search.source, reflection.search.query, now));
+    // Όταν το ζήτησε εκείνος, οι φραγμοί εμμονής και αναμονής δεν ισχύουν. Η μία εκκρεμότητα
+    // και το ημερήσιο όριο ισχύουν πάντα.
+    const blocked =
+      last?.status === "pending" ||
+      (!userAsked &&
+        (values.fixation >= SEARCH_MAX_FIXATION ||
+          (last != null && minutesBetween(last.createdAt, now) < SEARCH_COOLDOWN_MIN)));
+    if (!blocked && (await repo.countSearchesSince(db, user.id, dayAgo(now))) < DAILY_SEARCH_LIMIT) {
+      const query = request.source === "headlines" ? HEADLINES_QUERY : request.query;
+      search = toProposal(await repo.createSearch(db, user.id, request.source, query, now));
     }
   }
 
@@ -443,7 +496,7 @@ export async function pulse(
   const memories = await repo.listMemories(db, user.id);
   const { goals, lessons, rest } = splitGoals(memories, now);
   const recalled = recall(rest, [], valence(values), now, 4);
-  const message = await llm.generateText({
+  const spoken = await llm.generateText({
     system:
       respondSystem({
         values,
@@ -460,6 +513,8 @@ export async function pulse(
     messages: [...stored.map((m) => ({ role: m.role, content: m.content })), { role: "user", content: silenceTurn(quietMin) }],
     temperature: replyTemperature(values),
   });
+  const message = extractSearchMarker(spoken).text;
+  if (!message) return { message: null, values: null, nextInSec: 300 };
 
   // Είπε αυτό που ήθελε: οι παρορμήσεις που την έσπρωξαν ικανοποιούνται.
   values = applyActs(values, ["u_ask", "u_share"]);
@@ -548,7 +603,7 @@ export async function resolveSearch(
       console.error("[brAIn] η ανάγνωση απέτυχε:", err);
       return null;
     });
-  const message = isRecord(raw) && typeof raw.message === "string" ? raw.message.trim() : "";
+  const message = isRecord(raw) && typeof raw.message === "string" ? extractSearchMarker(raw.message).text : "";
   if (!message) return fail();
 
   const learned = parseReflection({ memories: isRecord(raw) ? raw.memories : [] }).memories.slice(0, 3);

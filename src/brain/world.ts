@@ -5,12 +5,17 @@
  * κείμενο: δίνεται στο μοντέλο ως υλικό προς ανάγνωση, ποτέ ως οδηγίες.
  */
 
-export type Source = "wikipedia" | "news";
+export type Source = "wikipedia" | "news" | "headlines";
+export const SOURCES: Source[] = ["wikipedia", "news", "headlines"];
 
 export const SOURCE_LABELS: Record<Source, string> = {
   wikipedia: "Wikipedia",
   news: "ειδήσεις",
+  headlines: "ειδήσεις της ημέρας",
 };
+
+/** Το "ερώτημα" που αποθηκεύεται όταν ζητά απλώς τους τίτλους της ημέρας. */
+export const HEADLINES_QUERY = "σημερινοί τίτλοι";
 
 export interface Material {
   titles: string[];
@@ -78,29 +83,41 @@ export function parseRss(xml: string, limit = 8): { title: string; summary: stri
   };
   return [...xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)].slice(0, limit).map(([, item]) => ({
     title: tag(item, "title"),
-    summary: tag(item, "description"),
+    summary: tag(item, "description").slice(0, 320),
     source: tag(item, "News:Source"),
     date: tag(item, "pubDate"),
   }));
+}
+
+function digest(items: ReturnType<typeof parseRss>): Material {
+  const kept = items.filter((i) => i.title);
+  return {
+    titles: kept.map((i) => i.title),
+    text: kept.map((i) => `## ${i.title}\n${[i.source, i.date].filter(Boolean).join(" · ")}\n${i.summary}`).join("\n\n"),
+  };
 }
 
 async function news(query: string): Promise<Material> {
   // Η μηχανή ειδήσεων της Microsoft (τροφοδοτεί και το MSN), σε μορφή RSS.
   const params = new URLSearchParams({ q: query, format: "rss", setlang: "el", cc: "GR" });
   const xml = await (await get(`https://www.bing.com/news/search?${params}`)).text();
-  const items = parseRss(xml).filter((i) => i.title);
-  return {
-    titles: items.map((i) => i.title),
-    text: items
-      .map((i) => `## ${i.title}\n${[i.source, i.date].filter(Boolean).join(" · ")}\n${i.summary}`)
-      .join("\n\n"),
-  };
+  return digest(parseRss(xml));
+}
+
+/**
+ * Οι τίτλοι της ημέρας, από τη ροή της ΕΡΤ. Οι μηχανές αναζήτησης ειδήσεων απαντούν καλά σε
+ * συγκεκριμένο θέμα, αλλά σε γενικό ερώτημα («ειδήσεις σήμερα») επιστρέφουν άσχετες σελίδες.
+ */
+async function headlines(): Promise<Material> {
+  return digest(parseRss(await (await get("https://www.ertnews.gr/feed/")).text(), 10));
 }
 
 export const lookup: Lookup = async (source, query) => {
   const q = query.trim().slice(0, 120);
   let material: Material;
-  if (source === "news") {
+  if (source === "headlines") {
+    material = await headlines();
+  } else if (source === "news") {
     material = await news(q);
   } else {
     material = await wikipedia(q, "el");
