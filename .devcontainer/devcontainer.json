@@ -1,0 +1,6 @@
+{
+  "name": "brAIn",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:22",
+  "postCreateCommand": "npm install",
+  "forwardPorts": [3000]
+}
