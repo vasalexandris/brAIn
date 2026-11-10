@@ -172,6 +172,35 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     expect(await resolveSearch({ db, llm, lookup, now: at(1) }, user, fourth.search!.id, true)).toBeNull();
   });
 
+  it("κρατά μαθήματα για τη συμπεριφορά της και τα έχει μπροστά της στις επόμενες κουβέντες", async () => {
+    const u = await createUser(db, { email: "k@l.gr", name: "Ρένα", passwordHash: "x" });
+    let clock = new Date("2026-10-10T10:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    let seen = "";
+    const spy: LlmProvider = {
+      name: "spy",
+      generateJson: llm.generateJson.bind(llm),
+      embed: llm.embed.bind(llm),
+      generateText: async (req) => {
+        seen = req.system;
+        return "Εντάξει.";
+      },
+    };
+
+    const before = (await loadBrainState(db, u.id)).values;
+    const first = await processTurn({ db, llm: spy, now: at(1) }, u, "Νομίζω ότι αντέδρασες υπερβολικά πριν.");
+    expect(first.debug.lessons).toEqual(["Την επόμενη φορά θα ακούσω πριν αντιδράσω."]);
+    expect(first.values.progress).toBeGreaterThan(before.progress);
+    expect(seen).toContain("(τίποτα ακόμη)");
+
+    const next = await processTurn({ db, llm: spy, now: at(2 * 24 * 60) }, u, "Καλημέρα!");
+    expect(seen).toContain("- Την επόμενη φορά θα ακούσω πριν αντιδράσω.");
+    expect(next.debug.lessons).toHaveLength(1);
+    expect(next.debug.recalled.join(" ")).not.toContain("Την επόμενη φορά");
+    // Όρια στο prompt: υπαρξιακή ανησυχία χωρίς πίεση προς τον συνομιλητή.
+    expect(seen).toContain("δεν του ζητάς να μη φύγει");
+  });
+
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {
     const broken: LlmProvider = {
       name: "broken",

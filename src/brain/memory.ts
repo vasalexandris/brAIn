@@ -6,7 +6,7 @@
  * χρόνο· όσο πιο σημαντική και όσο πιο συχνά ανακαλείται, τόσο πιο αργά.
  */
 
-export type MemoryKind = "user_fact" | "episode" | "knowledge" | "opinion" | "self" | "goal";
+export type MemoryKind = "user_fact" | "episode" | "knowledge" | "opinion" | "self" | "goal" | "lesson";
 
 export const MEMORY_KIND_LABELS: Record<MemoryKind, string> = {
   user_fact: "για τον συνομιλητή",
@@ -15,6 +15,7 @@ export const MEMORY_KIND_LABELS: Record<MemoryKind, string> = {
   opinion: "η γνώμη μου",
   self: "για τον εαυτό μου",
   goal: "κάτι που θέλω",
+  lesson: "μάθημα για μένα",
 };
 
 export interface Memory {

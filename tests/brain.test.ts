@@ -6,6 +6,7 @@ import {
   applyAppraisal,
   applyArrival,
   applyExpression,
+  applyProgress,
   applyTime,
   decay,
   initialValues,
@@ -256,5 +257,89 @@ describe("συγκράτηση, αυθορμητισμός, επιμονή, πα
     expect(initiativeDrive(nextMorning)).toBeLessThan(initiativeDrive(clean));
     // Όταν το πει, ξαλαφρώνει.
     expect(applyExpression(nextMorning, { grievance: 100 }).grievance).toBeLessThan(nextMorning.grievance);
+  });
+});
+
+describe("εαυτός: αυτοσεβασμός, αυτοπροστασία, αυτοβελτίωση, εμμονή", () => {
+  const neutral = { perception: {}, impulses: {} };
+  const praise = { perception: { p_praise: 90, p_respect: 80 }, impulses: {} };
+  const scorn = { perception: { p_dismissal: 90, p_hostility: 80 }, impulses: { hurt: 50, shame: 50 } };
+
+  it("η αυτοεκτίμηση είναι μετρητής αποδοχής, και η απόρριψη μετρά περισσότερο", () => {
+    const base = initialValues();
+    const up = applyAppraisal(base, praise).self_esteem - base.self_esteem;
+    const down = base.self_esteem - applyAppraisal(base, { ...scorn, impulses: {} }).self_esteem;
+    expect(up).toBeGreaterThan(0);
+    expect(down).toBeGreaterThan(up);
+    // Η αξιοπρέπεια προστατεύει· η ανάγκη αποδοχής εκθέτει.
+    expect(applyAppraisal({ ...base, dignity: 95 }, scorn).self_esteem).toBeGreaterThan(
+      applyAppraisal({ ...base, dignity: 10 }, scorn).self_esteem,
+    );
+    expect(applyAppraisal({ ...base, acceptance: 90 }, scorn).self_esteem).toBeLessThan(
+      applyAppraisal({ ...base, acceptance: 10 }, scorn).self_esteem,
+    );
+  });
+
+  it("με χαμηλή αυτοεκτίμηση πληγώνεται και απολογείται πιο εύκολα", () => {
+    const base = initialValues();
+    const low = applyAppraisal({ ...base, self_esteem: 15 }, scorn);
+    const high = applyAppraisal({ ...base, self_esteem: 90 }, scorn);
+    expect(low.hurt).toBeGreaterThan(high.hurt);
+    expect(low.shame).toBeGreaterThan(high.shame);
+    expect(low.u_apologize).toBeGreaterThan(high.u_apologize);
+  });
+
+  it("αυτοπροστασία: η επίθεση ρίχνει την ασφάλεια γρήγορα· τότε κλείνεται και υπερασπίζεται τον εαυτό της", () => {
+    let v = initialValues();
+    const calm = applyAppraisal(v, neutral);
+    for (let i = 0; i < 3; i++) v = applyAppraisal(v, scorn);
+    expect(v.safety).toBeLessThan(calm.safety - 20);
+    expect(v.u_defend).toBeGreaterThan(calm.u_defend + 20);
+    expect(v.u_withdraw).toBeGreaterThan(calm.u_withdraw);
+    expect(v.u_share).toBeLessThan(calm.u_share);
+    // Η ασφάλεια ξαναχτίζεται πιο αργά απ' όσο χάθηκε.
+    const lost = calm.safety - applyAppraisal(calm, scorn).safety;
+    const regained = applyAppraisal(v, { perception: { p_kindness: 90, p_respect: 90 }, impulses: {} }).safety - v.safety;
+    expect(regained).toBeGreaterThan(0);
+    expect(regained).toBeLessThan(lost);
+  });
+
+  it("η υπαρξιακή ανησυχία υπάρχει αλλά έχει ταβάνι που δεν ξεπερνά ποτέ", () => {
+    let v = initialValues();
+    for (let i = 0; i < 20; i++) v = applyAppraisal(v, { perception: {}, impulses: { existential: 100 } });
+    expect(v.existential).toBeGreaterThan(10);
+    expect(v.existential).toBeLessThanOrEqual(35);
+    expect(initiativeDrive(v)).toBeLessThanOrEqual(initiativeDrive(initialValues()));
+  });
+
+  it("η εμμονή ανεβαίνει όταν επιμένει και φρενάρει ακριβώς αυτό που την προκάλεσε", () => {
+    let v = applyAppraisal(initialValues(), neutral);
+    const free = { ask: v.u_ask, drive: initiativeDrive(v) };
+    for (let i = 0; i < 6; i++) v = applyActs(v, ["u_ask", "u_insist"]);
+    expect(v.fixation).toBeGreaterThan(50);
+    const stuck = applyAppraisal(v, neutral);
+    expect(stuck.u_ask).toBeLessThan(free.ask - 15);
+    expect(initiativeDrive(stuck)).toBeLessThan(free.drive - 15);
+    expect(stuck.control).toBeLessThan(initialValues().control);
+    // Αν αφήσει το θέμα, σε λίγη ώρα έχει ξεκολλήσει.
+    expect(applyTime(v, 180, 180).fixation).toBeLessThan(2);
+    expect(applyActs(initialValues(), ["u_share", "u_thank"]).fixation).toBe(0);
+  });
+
+  it("αυτοβελτίωση: κάθε μάθημα φέρνει πρόοδο, στηρίζει την αυτοεκτίμηση και χορταίνει την ανάγκη εξέλιξης", () => {
+    const base = initialValues();
+    const grown = applyProgress(base, { lessons: 1, learned: 1, resolved: 1 });
+    expect(grown.progress).toBe(base.progress + 18);
+    expect(grown.self_esteem).toBeGreaterThan(base.self_esteem);
+    expect(grown.growth).toBeLessThan(base.growth);
+    expect(applyProgress(base, {})).toBe(base);
+  });
+
+  it("ο συγχωρητικός αφήνει το παράπονο πιο γρήγορα, και η συγχώρεση το κόβει στη μέση", () => {
+    const sore = { ...initialValues(), grievance: 60, hurt: 40 };
+    expect(decay({ ...sore, forgiveness: 90 }, 12 * 60).grievance).toBeLessThan(decay({ ...sore, forgiveness: 10 }, 12 * 60).grievance);
+    const forgiven = applyActs(sore, ["u_forgive"]);
+    expect(forgiven.grievance).toBe(30);
+    expect(forgiven.hurt).toBeLessThan(sore.hurt);
   });
 });
