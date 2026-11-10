@@ -35,7 +35,7 @@ export const MIN_IMPORTANCE = 15;
 /** Κάτω από αυτή την ισχύ, η ανάμνηση θεωρείται ξεχασμένη. */
 export const FORGOTTEN_BELOW = 0.05;
 /** Πάνω από αυτή την ομοιότητα, μια νέα ανάμνηση αναθεωρεί την παλιά αντί να προστεθεί. */
-export const SAME_MEMORY_SIMILARITY = 0.92;
+export const SAME_MEMORY_SIMILARITY = 0.88;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -99,11 +99,21 @@ export function recall(
     })
     .filter((r) => r.strength >= FORGOTTEN_BELOW);
 
-  const byScore = [...alive].sort((a, b) => b.score - a.score).slice(0, limit);
+  // Δεν έρχεται στο μυαλό η ίδια σκέψη πέντε φορές με άλλα λόγια: από κάθε ομάδα σχεδόν ίδιων
+  // αναμνήσεων περνά μόνο η καλύτερη, ώστε να μένει χώρος και για κάτι διαφορετικό.
+  const byScore: Recalled[] = [];
+  for (const candidate of [...alive].sort((a, b) => b.score - a.score)) {
+    if (byScore.length >= limit) break;
+    const echo = byScore.some((kept) => cosine(kept.memory.embedding, candidate.memory.embedding) >= SAME_MEMORY_SIMILARITY);
+    if (!echo) byScore.push(candidate);
+  }
   // Τα πολύ βασικά (π.χ. το όνομά του) είναι πάντα διαθέσιμα, άσχετα με το θέμα.
   const core = [...alive]
     .sort((a, b) => b.memory.importance * b.strength - a.memory.importance * a.strength)
     .slice(0, 2);
-  for (const c of core) if (!byScore.includes(c)) byScore.push(c);
+  for (const c of core) {
+    const echo = byScore.some((kept) => cosine(kept.memory.embedding, c.memory.embedding) >= SAME_MEMORY_SIMILARITY);
+    if (!byScore.includes(c) && !echo) byScore.push(c);
+  }
   return byScore;
 }

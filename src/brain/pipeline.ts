@@ -30,7 +30,9 @@ import {
   perceivePrompt,
   reflectPrompt,
   respondSystem,
+  SELF_IMAGE_MAX,
   silenceTurn,
+  trimToSentence,
   type TimeSense,
 } from "./prompts";
 import {
@@ -219,7 +221,7 @@ function parseReflection(raw: unknown): Reflection {
     memories,
     resolvedGoals: (Array.isArray(r.resolved_goals) ? r.resolved_goals : []).map(Number).filter(Number.isInteger),
     impression: typeof r.impression === "string" ? r.impression.trim().slice(0, 600) : "",
-    selfImage: typeof r.self_image === "string" ? r.self_image.trim().slice(0, 800) : "",
+    selfImage: typeof r.self_image === "string" ? trimToSentence(r.self_image, SELF_IMAGE_MAX + 50) : "",
     search:
       isRecord(r.search) && typeof r.search.query === "string" && r.search.query.trim()
         ? {
@@ -324,6 +326,7 @@ export async function processTurn(
         impression: state.impression,
         selfImage: state.selfImage,
         goals: goalTexts,
+        known: recalled.map((r) => r.memory.content),
         message,
         reply,
       }),

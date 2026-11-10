@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DIMENSIONS } from "@/brain/dimensions";
 import { cosine, encodeImportance, recall, strength, type Memory } from "@/brain/memory";
+import { trimToSentence } from "@/brain/prompts";
 import {
   applyActs,
   applyAppraisal,
@@ -112,6 +113,13 @@ describe("μνήμη", () => {
     const bright = mem({ content: "γλυκό", valence: 1 });
     expect(recall([bright, dark], [1, 0], -1, now)[0].memory.content).toBe("πικρό");
     expect(cosine([1, 2], [2, 4])).toBeCloseTo(1);
+  });
+
+  it("η ίδια σκέψη με άλλα λόγια ανακαλείται μία φορά, και μένει χώρος για κάτι διαφορετικό", () => {
+    const same = [0, 1, 2, 3].map((i) => mem({ content: `μου αρέσει να μαθαίνω ${i}`, embedding: [1, 0.01 * i], importance: 60 - i }));
+    const different = mem({ content: "το όνομά του", embedding: [0.6, 0.8], importance: 30 });
+    const got = recall([...same, different], [1, 0], 0, now, 3).map((r) => r.memory.content);
+    expect(got).toEqual(["μου αρέσει να μαθαίνω 0", "το όνομά του"]);
   });
 });
 
@@ -341,5 +349,14 @@ describe("εαυτός: αυτοσεβασμός, αυτοπροστασία, α
     const forgiven = applyActs(sore, ["u_forgive"]);
     expect(forgiven.grievance).toBe(30);
     expect(forgiven.hurt).toBeLessThan(sore.hurt);
+  });
+});
+
+describe("εικόνα εαυτού", () => {
+  it("κόβεται σε τέλος πρότασης, ποτέ στη μέση λέξης", () => {
+    expect(trimToSentence("Μικρό κείμενο.", 100)).toBe("Μικρό κείμενο.");
+    const long = "Πρώτη πρόταση εδώ. Δεύτερη πρόταση που συνεχίζει. Τρίτη πρόταση που δεν χωρά ολόκληρη στο όριο";
+    expect(trimToSentence(long, 60)).toBe("Πρώτη πρόταση εδώ. Δεύτερη πρόταση που συνεχίζει.");
+    expect(trimToSentence("λέξη ".repeat(40), 52).endsWith("λέξη…")).toBe(true);
   });
 });

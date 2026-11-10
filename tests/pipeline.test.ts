@@ -308,6 +308,37 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     expect((await processTurn({ db, llm: oblivious, now: at(1) }, u, "Διάβασε και τις ειδήσεις ξανά")).search).not.toBeNull();
   });
 
+  it("ο αναστοχασμός βλέπει τι θυμάται ήδη, και ζητείται συμπύκνωση όταν η εικόνα εαυτού φουσκώσει", async () => {
+    const u = await createUser(db, { email: "u@v.gr", name: "Ζωή", passwordHash: "x" });
+    let clock = new Date("2026-11-05T10:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    let reflectPrompt = "";
+    let nextSelf = "";
+    const spy: LlmProvider = {
+      name: "spy",
+      embed: llm.embed.bind(llm),
+      generateText: async () => "Εντάξει.",
+      generateJson: async (req) => {
+        if (!req.prompt.includes("<απάντηση>")) return { perception: {}, impulses: {} };
+        reflectPrompt = req.prompt;
+        return { self_image: nextSelf, memories: [] };
+      },
+    };
+
+    await processTurn({ db, llm, now: at(1) }, u, "Γεια σου, με λένε Ζωή.");
+    nextSelf = "Μου αρέσει να μαθαίνω. ".repeat(40);
+    const bloated = await processTurn({ db, llm: spy, now: at(1) }, u, "Με λένε Ζωή, θυμάσαι;");
+    expect(reflectPrompt).toContain("- Τον συνομιλητή μου τον λένε Ζωή.");
+    expect(reflectPrompt).not.toContain("έχει γίνει πολύ μεγάλη");
+    // Ό,τι κι αν επιστρέψει το μοντέλο, αποθηκεύεται κομμένο σε τέλος πρότασης.
+    expect(bloated.debug.selfImage.length).toBeLessThanOrEqual(500);
+    expect(bloated.debug.selfImage.endsWith("μαθαίνω.")).toBe(true);
+
+    nextSelf = "";
+    await processTurn({ db, llm: spy, now: at(1) }, u, "Ωραία");
+    expect(reflectPrompt).toContain("έχει γίνει πολύ μεγάλη");
+  });
+
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {
     const broken: LlmProvider = {
       name: "broken",
