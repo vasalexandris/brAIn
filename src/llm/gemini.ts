@@ -94,30 +94,41 @@ export class GeminiProvider implements LlmProvider {
     return JSON.parse(GeminiProvider.text(data));
   }
 
-  /** Αναζήτηση Google μέσα από το Gemini (grounding), με το ίδιο κλειδί. */
+  /**
+   * Αναζήτηση Google μέσα από το Gemini (grounding), με το ίδιο κλειδί.
+   * Το μοντέλο αποφασίζει μόνο του αν θα ψάξει· στην πράξη μερικές φορές απαντά από μνήμης. Γι' αυτό
+   * γίνονται έως δύο προσπάθειες, η δεύτερη με πιο ωμή εντολή, και δεκτή γίνεται μόνο απάντηση
+   * που συνοδεύεται από ίχνη πραγματικής αναζήτησης.
+   */
   async searchWeb(query: string): Promise<{ titles: string[]; text: string }> {
     const model = this.opts.model;
-    const data = await this.post(`${model}:generateContent`, {
-      systemInstruction: {
-        parts: [
-          {
-            text: "Είσαι εργαλείο έρευνας. Ψάξε στο διαδίκτυο και ανάφερε τι βρήκες για το ερώτημα: γεγονότα, αριθμούς, ονόματα και ημερομηνίες ακριβώς όπως τα γράφουν οι πηγές. Αν δεν βρεις αυτό που ζητείται, γράψε καθαρά ότι δεν το βρήκες. Μην εικάζεις και μη συμπληρώνεις από μνήμης. Ελληνικά, έως 250 λέξεις, χωρίς σχόλια.",
-          },
-        ],
-      },
-      contents: [
-        { role: "user", parts: [{ text: `Σημερινή ημερομηνία: ${new Date().toISOString().slice(0, 10)}\nΕρώτημα: ${query}` }] },
-      ],
-      tools: [{ google_search: {} }],
-      generationConfig: this.generationConfig(model, { temperature: 0.1 }),
-    });
-    const chunks: any[] = data?.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
-    // Χωρίς πηγές δεν έγινε αναζήτηση: το κείμενο θα ήταν απλώς ό,τι "θυμάται" το μοντέλο.
-    if (!chunks.length) throw new Error("Το Gemini απάντησε χωρίς να ψάξει");
-    return {
-      titles: chunks.map((c) => c?.web?.title).filter((t): t is string => typeof t === "string").slice(0, 8),
-      text: GeminiProvider.text(data).trim(),
-    };
+    const today = new Date().toISOString().slice(0, 10);
+    const attempts = [
+      `Σημερινή ημερομηνία: ${today}.\nΨάξε στο Google και ανάφερε τι βρήκες για: ${query}\n\nΓράψε γεγονότα, αριθμούς, ονόματα και ημερομηνίες ακριβώς όπως τα δίνουν οι πηγές. Αν δεν βρεις αυτό που ζητείται, πες καθαρά ότι δεν το βρήκες. Μη συμπληρώνεις από μνήμης. Ελληνικά, έως 250 λέξεις.`,
+      `Today is ${today}. You MUST call Google Search before answering; do not answer from memory. Search for: ${query}\nThen report in Greek exactly what the sources say (facts, numbers, names, dates), in at most 250 words. If the sources do not contain it, say so.`,
+    ];
+    let why = "";
+    for (const prompt of attempts) {
+      const data = await this.post(`${model}:generateContent`, {
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        tools: [{ google_search: {} }],
+        generationConfig: { temperature: 0.1 },
+      });
+      const candidate = data?.candidates?.[0];
+      const meta = candidate?.groundingMetadata ?? {};
+      const chunks: any[] = Array.isArray(meta.groundingChunks) ? meta.groundingChunks : [];
+      const searched = chunks.length > 0 || (Array.isArray(meta.webSearchQueries) && meta.webSearchQueries.length > 0);
+      if (searched) {
+        return {
+          titles: chunks.map((c) => c?.web?.title).filter((t): t is string => typeof t === "string").slice(0, 8),
+          text: GeminiProvider.text(data).trim(),
+        };
+      }
+      // Για διάγνωση: τι ακριβώς επέστρεψε όταν δεν έψαξε.
+      const said = (candidate?.content?.parts ?? []).map((p: any) => p?.text ?? "").join("").slice(0, 160);
+      why = `finishReason=${candidate?.finishReason}, metadata=[${Object.keys(meta).join(",")}], κείμενο="${said}"`;
+    }
+    throw new Error(`Το Gemini (${model}) απάντησε χωρίς να ψάξει: ${why}`);
   }
 
   async embed(text: string): Promise<number[]> {

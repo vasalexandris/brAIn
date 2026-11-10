@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { BUILD } from "@/build";
 import { isApproved } from "@/auth/access";
 import { currentUser } from "@/auth/session";
 import { busy } from "@/brain/lock";
@@ -22,7 +23,7 @@ export async function POST(req: Request) {
   try {
     const result = await resolveSearch({ db: await getDb(), llm: getLlm() }, user, id, body.approve);
     if (!result) return NextResponse.json({ error: "Η πρόταση αυτή δεν ισχύει πια." }, { status: 409 });
-    return NextResponse.json(result);
+    return NextResponse.json(result, { headers: { "x-brain-build": BUILD } });
   } catch (err) {
     console.error("[brAIn] η αναζήτηση απέτυχε:", err);
     return NextResponse.json({ error: "Κάτι πήγε στραβά. Δοκίμασε ξανά." }, { status: 502 });
