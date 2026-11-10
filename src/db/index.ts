@@ -20,6 +20,9 @@ CREATE TABLE IF NOT EXISTS users (
   created_at    timestamptz NOT NULL DEFAULT now()
 );
 
+-- Έγκριση λογαριασμών: pending → approved | rejected (βλ. src/auth/access.ts).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending';
+
 -- Ένας εγκέφαλος ανά χρήστη: οι τιμές όλων των δεικτών και η εντύπωση για τον άνθρωπο.
 CREATE TABLE IF NOT EXISTS brain_states (
   user_id    text PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,

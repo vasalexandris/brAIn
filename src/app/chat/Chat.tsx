@@ -18,9 +18,10 @@ interface Props {
   initialImpression: string;
   dimensions: { key: string; label: string; category: string }[];
   categories: Record<string, string>;
+  admin: boolean;
 }
 
-export function Chat({ initialMessages, initialValues, initialImpression, dimensions, categories }: Props) {
+export function Chat({ initialMessages, initialValues, initialImpression, dimensions, categories, admin }: Props) {
   const [messages, setMessages] = useState(initialMessages);
   const [values, setValues] = useState(initialValues);
   const [debug, setDebug] = useState<Debug>({ note: "", recalled: [], stored: [], impression: initialImpression });
@@ -78,6 +79,11 @@ export function Chat({ initialMessages, initialValues, initialImpression, dimens
             br<b>AI</b>n
           </span>
           <div className="chat-actions">
+            {admin && (
+              <a className="btn" href="/admin">
+                Διαχείριση
+              </a>
+            )}
             <button className="btn" onClick={() => setInspect((v) => !v)} aria-pressed={inspect}>
               {inspect ? "Κλείσιμο" : "Εσωτερική κατάσταση"}
             </button>

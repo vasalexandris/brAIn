@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { isApproved } from "@/auth/access";
 import { currentUser } from "@/auth/session";
 import { processTurn } from "@/brain/pipeline";
 import { getDb } from "@/db";
@@ -13,6 +14,8 @@ const busy = new Set<string>();
 export async function POST(req: Request) {
   const user = await currentUser();
   if (!user) return NextResponse.json({ error: "Δεν είσαι συνδεδεμένος." }, { status: 401 });
+
+  if (!isApproved(user)) return NextResponse.json({ error: "Ο λογαριασμός σου δεν έχει εγκριθεί." }, { status: 403 });
 
   const body = await req.json().catch(() => null);
   const message = typeof body?.message === "string" ? body.message.trim() : "";

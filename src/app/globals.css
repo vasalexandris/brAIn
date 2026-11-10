@@ -85,3 +85,17 @@ button, input, textarea { font: inherit; color: inherit; }
 @media (max-width: 800px) {
   .inspector { position: fixed; inset: 53px 0 0 0; width: auto; background: var(--bg); border-left: 0; }
 }
+
+/* Διαχείριση */
+.admin { max-width: 720px; margin: 0 auto; padding: 0 16px 48px; }
+.user-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.user-list li { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.user-info { display: flex; flex-direction: column; min-width: 0; }
+.user-info span { color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
+.user-actions { display: flex; gap: 8px; }
+.user-actions .btn { padding: 6px 14px; font-size: 14px; }
+.status { font-style: normal; }
+.status.pending { color: #e6b45a; }
+.status.approved { color: #6fcf97; }
+.status.rejected { color: var(--danger); }
+.auth .btn + .btn { margin-top: 10px; }

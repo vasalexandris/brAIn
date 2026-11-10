@@ -9,7 +9,11 @@ export interface User {
   email: string;
   name: string;
   passwordHash: string;
+  status: UserStatus;
+  createdAt: Date;
 }
+
+export type UserStatus = "pending" | "approved" | "rejected";
 
 export interface BrainState {
   values: BrainValues;
@@ -25,7 +29,14 @@ export interface StoredMessage {
   createdAt: Date;
 }
 
-const toUser = (r: any): User => ({ id: r.id, email: r.email, name: r.name, passwordHash: r.password_hash });
+const toUser = (r: any): User => ({
+  id: r.id,
+  email: r.email,
+  name: r.name,
+  passwordHash: r.password_hash,
+  status: r.status,
+  createdAt: new Date(r.created_at),
+});
 
 export async function createUser(db: Db, input: { email: string; name: string; passwordHash: string }): Promise<User> {
   const rows = await db.query(
@@ -47,6 +58,15 @@ export async function findUserByEmail(db: Db, email: string): Promise<User | nul
 export async function findUserById(db: Db, id: string): Promise<User | null> {
   const rows = await db.query(`SELECT * FROM users WHERE id = $1`, [id]);
   return rows.length ? toUser(rows[0]) : null;
+}
+
+export async function listUsers(db: Db): Promise<User[]> {
+  return (await db.query(`SELECT * FROM users ORDER BY created_at DESC LIMIT 500`)).map(toUser);
+}
+
+export async function setUserStatus(db: Db, id: string, status: UserStatus): Promise<boolean> {
+  const rows = await db.query(`UPDATE users SET status = $2 WHERE id = $1 RETURNING id`, [id, status]);
+  return rows.length > 0;
 }
 
 export async function loadBrainState(db: Db, userId: string): Promise<BrainState> {
