@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { BUILD } from "@/build";
 import { isApproved } from "@/auth/access";
 import { currentUser } from "@/auth/session";
 import { busy } from "@/brain/lock";
@@ -25,7 +26,7 @@ export async function POST(req: Request) {
   busy.add(user.id);
   try {
     const result = await processTurn({ db: await getDb(), llm: getLlm() }, user, message);
-    return NextResponse.json(result);
+    return NextResponse.json(result, { headers: { "x-brain-build": BUILD } });
   } catch (err) {
     if (err instanceof DailyLimitError) {
       return NextResponse.json({ error: "Μιλήσαμε πολύ σήμερα. Ας συνεχίσουμε αύριο." }, { status: 429 });

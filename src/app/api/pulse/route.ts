@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { BUILD } from "@/build";
 import { isApproved } from "@/auth/access";
 import { currentUser } from "@/auth/session";
 import { busy } from "@/brain/lock";
@@ -16,7 +17,7 @@ export async function POST() {
 
   busy.add(user.id);
   try {
-    return NextResponse.json(await pulse({ db: await getDb(), llm: getLlm() }, user));
+    return NextResponse.json(await pulse({ db: await getDb(), llm: getLlm() }, user), { headers: { "x-brain-build": BUILD } });
   } catch (err) {
     console.error("[brAIn] ο σφυγμός απέτυχε:", err);
     return NextResponse.json({ message: null, values: null, nextInSec: 300 });

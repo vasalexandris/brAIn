@@ -21,6 +21,8 @@ interface Proposal {
   query: string;
 }
 interface Props {
+  /** Η έκδοση του κώδικα με την οποία φορτώθηκε η σελίδα. */
+  build: string;
   initialSearch: Proposal | null;
   initialMessages: Msg[];
   initialValues: Record<string, number>;
@@ -31,7 +33,7 @@ interface Props {
   admin: boolean;
 }
 
-export function Chat({ initialMessages, initialValues, initialImpression, initialSelfImage, initialSearch, dimensions, categories, admin }: Props) {
+export function Chat({ initialMessages, initialValues, initialImpression, initialSelfImage, initialSearch, build, dimensions, categories, admin }: Props) {
   const [messages, setMessages] = useState(initialMessages);
   const [values, setValues] = useState(initialValues);
   const [debug, setDebug] = useState<Debug>({
@@ -49,6 +51,18 @@ export function Chat({ initialMessages, initialValues, initialImpression, initia
   const [proposal, setProposal] = useState<Proposal | null>(initialSearch);
   const bottom = useRef<HTMLDivElement>(null);
 
+  // Αν ο server έχει ενημερωθεί από τότε που άνοιξε η καρτέλα, η σελίδα ξαναφορτώνει μόνη της.
+  // Μια παλιά καρτέλα δεν ξέρει να δείξει ό,τι προστέθηκε μετά, ενώ όλη η συζήτηση είναι
+  // αποθηκευμένη, άρα δεν χάνεται τίποτα.
+  const stale = (res: Response) => {
+    const serverBuild = res.headers.get("x-brain-build");
+    if (serverBuild && serverBuild !== build) {
+      window.location.reload();
+      return true;
+    }
+    return false;
+  };
+
   // Σφυγμός: όσο σωπαίνεις, ρωτάμε τον server πότε θα "αντέξει" τη σιωπή — και αν μίλησε πρώτη.
   const live = useRef({ busy, typing: false });
   live.current = { busy, typing: text.trim() !== "" };
@@ -64,6 +78,7 @@ export function Chat({ initialMessages, initialValues, initialImpression, initia
       }
       try {
         const res = await fetch("/api/pulse", { method: "POST" });
+        if (stale(res)) return;
         const body = res.ok ? await res.json() : null;
         if (body?.message) {
           setMessages((m) => [...m, { role: "assistant", content: body.message }]);
@@ -103,6 +118,8 @@ export function Chat({ initialMessages, initialValues, initialImpression, initia
         return;
       }
       if (!res.ok || !body?.reply) throw new Error(body?.error ?? "Κάτι πήγε στραβά. Δοκίμασε ξανά.");
+      // Το μήνυμα αποθηκεύτηκε· αν η καρτέλα είναι παλιά, η ανανέωση θα τα δείξει όλα σωστά.
+      if (stale(res)) return;
       setMessages((m) => [
         ...m,
         { role: "assistant", content: body.reply },
@@ -135,6 +152,7 @@ export function Chat({ initialMessages, initialValues, initialImpression, initia
       });
       const body = await res.json().catch(() => null);
       if (!res.ok) throw new Error(body?.error ?? "Κάτι πήγε στραβά.");
+      if (stale(res)) return;
       if (body.message) setMessages((m) => [...m, { role: "assistant", content: body.message }]);
       setValues(body.values);
       if (body.stored?.length) setDebug((d) => ({ ...d, stored: body.stored }));
