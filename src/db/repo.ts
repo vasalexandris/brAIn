@@ -185,3 +185,56 @@ export async function reinforceMemories(db: Db, ids: string[], now: Date): Promi
     ]);
   }
 }
+
+// ------------------------------------------------------------- Αναζητήσεις
+
+export interface Search {
+  id: string;
+  source: "wikipedia" | "news";
+  query: string;
+  status: "pending" | "done" | "declined" | "failed";
+  createdAt: Date;
+}
+
+const toSearch = (r: any): Search => ({
+  id: r.id,
+  source: r.source,
+  query: r.query,
+  status: r.status,
+  createdAt: new Date(r.created_at),
+});
+
+export async function createSearch(db: Db, userId: string, source: Search["source"], query: string, now: Date): Promise<Search> {
+  const rows = await db.query(
+    `INSERT INTO searches (id, user_id, source, query, created_at) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+    [randomUUID(), userId, source, query, now.toISOString()],
+  );
+  return toSearch(rows[0]);
+}
+
+/** Η πιο πρόσφατη αναζήτηση του χρήστη, σε όποια κατάσταση κι αν είναι. */
+export async function latestSearch(db: Db, userId: string): Promise<Search | null> {
+  const rows = await db.query(`SELECT * FROM searches WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, [userId]);
+  return rows.length ? toSearch(rows[0]) : null;
+}
+
+/** Κλείνει μια εκκρεμή αναζήτηση. Επιστρέφει null αν δεν ήταν εκκρεμής (π.χ. διπλό κλικ). */
+export async function closeSearch(db: Db, userId: string, id: string, status: Search["status"]): Promise<Search | null> {
+  const rows = await db.query(
+    `UPDATE searches SET status = $3 WHERE id = $1 AND user_id = $2 AND status = 'pending' RETURNING *`,
+    [id, userId, status],
+  );
+  return rows.length ? toSearch(rows[0]) : null;
+}
+
+export async function setSearchStatus(db: Db, id: string, status: Search["status"]): Promise<void> {
+  await db.query(`UPDATE searches SET status = $2 WHERE id = $1`, [id, status]);
+}
+
+export async function countSearchesSince(db: Db, userId: string, since: Date): Promise<number> {
+  const rows = await db.query(
+    `SELECT count(*)::int AS n FROM searches WHERE user_id = $1 AND created_at >= $2 AND status IN ('done', 'failed')`,
+    [userId, since.toISOString()],
+  );
+  return rows[0].n;
+}

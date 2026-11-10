@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { processTurn, pulse } from "@/brain/pipeline";
+import { processTurn, pulse, resolveSearch } from "@/brain/pipeline";
 import { createPgliteDb, type Db } from "@/db";
 import { createUser, listMemories, loadBrainState, recentMessages } from "@/db/repo";
 import { MockProvider } from "@/llm/mock";
@@ -121,6 +121,55 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     expect(done.debug.selfImage).toContain("Μου αρέσει");
     expect((await listMemories(db, u.id)).filter((m) => m.kind === "goal")).toHaveLength(0);
     expect((await loadBrainState(db, u.id)).selfImage).toContain("Μου αρέσει");
+  });
+
+  it("ζητά άδεια να ψάξει, διαβάζει μόνο με έγκριση, και κρατά ό,τι έμαθε", async () => {
+    const u = await createUser(db, { email: "i@j.gr", name: "Θάνος", passwordHash: "x" });
+    let clock = new Date("2026-10-01T10:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    const calls: string[] = [];
+    const lookup = async (source: string, query: string) => {
+      calls.push(`${source}:${query}`);
+      return { titles: ["Κβάζαρ"], text: "## Κβάζαρ\nΕξαιρετικά φωτεινός ενεργός γαλαξιακός πυρήνας." };
+    };
+
+    const plain = await processTurn({ db, llm, now: at(1) }, u, "Γεια σου!");
+    expect(plain.search).toBeNull();
+
+    const asked = await processTurn({ db, llm, now: at(1) }, u, "Ξέρεις τι είναι τα κβάζαρ;");
+    expect(asked.search).toMatchObject({ source: "wikipedia", sourceLabel: "Wikipedia", query: "κβάζαρ" });
+    expect(calls).toEqual([]); // τίποτα δεν διαβάζεται χωρίς έγκριση
+
+    // Όσο εκκρεμεί μία πρόταση, δεν κάνει δεύτερη.
+    expect((await processTurn({ db, llm, now: at(1) }, u, "Και τι είναι οι πάλσαρ;")).search).toBeNull();
+
+    const before = (await loadBrainState(db, u.id)).values;
+    const read = await resolveSearch({ db, llm, lookup, now: at(1) }, u, asked.search!.id, true);
+    expect(calls).toEqual(["wikipedia:κβάζαρ"]);
+    expect(read!.message).toContain("Κβάζαρ");
+    expect(read!.stored).toEqual(["Έμαθα για: Κβάζαρ."]);
+    expect(read!.values.thirst).toBeLessThan(before.thirst);
+    expect((await listMemories(db, u.id)).some((m) => m.kind === "knowledge" && m.content.includes("Κβάζαρ"))).toBe(true);
+    // Δεύτερο κλικ στην ίδια πρόταση δεν κάνει τίποτα.
+    expect(await resolveSearch({ db, llm, lookup, now: at(0) }, u, asked.search!.id, true)).toBeNull();
+
+    // Άρνηση: δεν διαβάζει, μένει λίγη ματαίωση. Αποτυχία πηγής: το λέει, δεν επινοεί.
+    const second = await processTurn({ db, llm, now: at(15) }, u, "Πες μου τι είναι οι μαύρες τρύπες;");
+    const declined = await resolveSearch({ db, llm, lookup, now: at(1) }, u, second.search!.id, false);
+    expect(declined!.message).toBeNull();
+    expect(calls).toHaveLength(1);
+
+    const third = await processTurn({ db, llm, now: at(15) }, u, "Τι είναι το νετρίνο;");
+    const broken = async () => {
+      throw new Error("429");
+    };
+    const failed = await resolveSearch({ db, llm, lookup: broken, now: at(1) }, u, third.search!.id, true);
+    expect(failed!.message).toContain("δεν κατάφερα");
+    expect(failed!.stored).toEqual([]);
+
+    // Ξένος χρήστης δεν μπορεί να εγκρίνει πρόταση άλλου.
+    const fourth = await processTurn({ db, llm, now: at(15) }, u, "Τι είναι ο γαλαξίας;");
+    expect(await resolveSearch({ db, llm, lookup, now: at(1) }, user, fourth.search!.id, true)).toBeNull();
   });
 
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {

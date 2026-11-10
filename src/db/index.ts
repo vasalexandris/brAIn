@@ -46,6 +46,18 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_user_time ON messages (user_id, created_at);
 
+-- Αναζητήσεις στον κόσμο: τις προτείνει ο εγκέφαλος, τις εγκρίνει ο συνομιλητής.
+-- status: pending → done | declined | failed
+CREATE TABLE IF NOT EXISTS searches (
+  id         text PRIMARY KEY,
+  user_id    text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  source     text NOT NULL,
+  query      text NOT NULL,
+  status     text NOT NULL DEFAULT 'pending',
+  created_at timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS searches_user_time ON searches (user_id, created_at);
+
 -- Μακρόχρονη μνήμη: μόνο ό,τι άξιζε να κρατηθεί.
 CREATE TABLE IF NOT EXISTS memories (
   id               text PRIMARY KEY,

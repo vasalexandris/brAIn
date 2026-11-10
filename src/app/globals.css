@@ -99,3 +99,9 @@ button, input, textarea { font: inherit; color: inherit; }
 .status.approved { color: #6fcf97; }
 .status.rejected { color: var(--danger); }
 .auth .btn + .btn { margin-top: 10px; }
+
+/* Πρόταση αναζήτησης */
+.proposal { align-self: flex-start; max-width: 85%; display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px dashed var(--accent); border-radius: 14px; font-size: 15px; color: var(--muted); }
+.proposal strong { color: var(--text); }
+.proposal div { display: flex; gap: 8px; }
+.proposal .btn { padding: 6px 14px; font-size: 14px; }

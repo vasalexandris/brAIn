@@ -14,7 +14,13 @@ interface Debug {
   selfImage: string;
   goals: string[];
 }
+interface Proposal {
+  id: string;
+  sourceLabel: string;
+  query: string;
+}
 interface Props {
+  initialSearch: Proposal | null;
   initialMessages: Msg[];
   initialValues: Record<string, number>;
   initialImpression: string;
@@ -24,7 +30,7 @@ interface Props {
   admin: boolean;
 }
 
-export function Chat({ initialMessages, initialValues, initialImpression, initialSelfImage, dimensions, categories, admin }: Props) {
+export function Chat({ initialMessages, initialValues, initialImpression, initialSelfImage, initialSearch, dimensions, categories, admin }: Props) {
   const [messages, setMessages] = useState(initialMessages);
   const [values, setValues] = useState(initialValues);
   const [debug, setDebug] = useState<Debug>({
@@ -39,6 +45,7 @@ export function Chat({ initialMessages, initialValues, initialImpression, initia
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [inspect, setInspect] = useState(false);
+  const [proposal, setProposal] = useState<Proposal | null>(initialSearch);
   const bottom = useRef<HTMLDivElement>(null);
 
   // Σφυγμός: όσο σωπαίνεις, ρωτάμε τον server πότε θα "αντέξει" τη σιωπή — και αν μίλησε πρώτη.
@@ -74,7 +81,7 @@ export function Chat({ initialMessages, initialValues, initialImpression, initia
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: "end" });
-  }, [messages, busy]);
+  }, [messages, busy, proposal]);
 
   async function send() {
     const message = text.trim();
@@ -98,11 +105,36 @@ export function Chat({ initialMessages, initialValues, initialImpression, initia
       setMessages((m) => [...m, { role: "assistant", content: body.reply }]);
       setValues(body.values);
       setDebug(body.debug);
+      setProposal(body.search ?? null);
       schedule.current(45);
     } catch (err) {
       // Το μήνυμα δεν αποθηκεύτηκε: το επιστρέφουμε στο πεδίο για να ξανασταλεί.
       setMessages((m) => m.slice(0, -1));
       setText(message);
+      setError(err instanceof Error ? err.message : "Κάτι πήγε στραβά.");
+    }
+    setBusy(false);
+  }
+
+  async function answerSearch(approve: boolean) {
+    if (!proposal || busy) return;
+    const current = proposal;
+    setProposal(null);
+    setError("");
+    if (approve) setBusy(true);
+    try {
+      const res = await fetch("/api/search", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: current.id, approve }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error ?? "Κάτι πήγε στραβά.");
+      if (body.message) setMessages((m) => [...m, { role: "assistant", content: body.message }]);
+      setValues(body.values);
+      if (body.stored?.length) setDebug((d) => ({ ...d, stored: body.stored }));
+      schedule.current(45);
+    } catch (err) {
       setError(err instanceof Error ? err.message : "Κάτι πήγε στραβά.");
     }
     setBusy(false);
@@ -143,6 +175,21 @@ export function Chat({ initialMessages, initialValues, initialImpression, initia
                 {m.content}
               </div>
             ))}
+            {proposal && !busy && (
+              <div className="proposal">
+                <span>
+                  Θέλει να ψάξει ({proposal.sourceLabel}): <strong>{proposal.query}</strong>
+                </span>
+                <div>
+                  <button className="btn primary" onClick={() => answerSearch(true)}>
+                    Να ψάξει
+                  </button>
+                  <button className="btn" onClick={() => answerSearch(false)}>
+                    Όχι τώρα
+                  </button>
+                </div>
+              </div>
+            )}
             {busy && <div className="bubble assistant pending">σκέφτεται…</div>}
             <div ref={bottom} />
           </div>
