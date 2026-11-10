@@ -86,6 +86,10 @@ export class MockProvider implements LlmProvider {
       memories.push({ kind: "goal", content: `Θέλω να μάθω γιατί αγαπά ${loves[1]}.`, importance: 60, valence: 30 });
     }
     const explained = strip(user).includes("επειδη") && prompt.includes("1. Θέλω να μάθω");
+    // Μάθημα: όταν της πουν ότι αντέδρασε υπερβολικά.
+    if (strip(user).includes("υπερβολικ")) {
+      memories.push({ kind: "lesson", content: "Την επόμενη φορά θα ακούσω πριν αντιδράσω.", importance: 60, valence: -10 });
+    }
     const asks = /τι είναι (?:η |ο |το |οι |τα )?([^;?.!]+)/i.exec(user);
     return {
       search: asks ? { source: "wikipedia", query: asks[1].trim() } : null,

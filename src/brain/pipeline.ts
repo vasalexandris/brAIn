@@ -38,6 +38,7 @@ import {
   applyAppraisal,
   applyArrival,
   applyExpression,
+  applyProgress,
   applyTime,
   arousal,
   clamp,
@@ -66,17 +67,32 @@ export class DailyLimitError extends Error {}
 
 /** Πόσα πρόσφατα μηνύματα μένουν στην "άμεση" μνήμη εργασίας. */
 const WORKING_MEMORY = 16;
-const MEMORY_KINDS: MemoryKind[] = ["user_fact", "episode", "knowledge", "opinion", "self", "goal"];
+const MEMORY_KINDS: MemoryKind[] = ["user_fact", "episode", "knowledge", "opinion", "self", "goal", "lesson"];
 /** Πόσους στόχους έχει "στο μυαλό" της ταυτόχρονα. */
 const ACTIVE_GOALS = 3;
+/** Πόσα μαθήματα για τον εαυτό της έχει πάντα μπροστά της. */
+const ACTIVE_LESSONS = 4;
+/** Πάνω από τόση εμμονή δεν ζητά να ψάξει: έχει ήδη κολλήσει. */
+const SEARCH_MAX_FIXATION = 50;
 
-/** Χωρίζει τη μνήμη σε ενεργούς στόχους (οι ισχυρότεροι που δεν έχουν ξεχαστεί) και όλα τα υπόλοιπα. */
+/** Τα ισχυρότερα ζωντανά ενός είδους. */
+function strongest(memories: Memory[], kind: MemoryKind, now: Date, limit: number): Memory[] {
+  return memories
+    .filter((m) => m.kind === kind && strength(m, now) >= FORGOTTEN_BELOW)
+    .sort((x, y) => y.importance * strength(y, now) - x.importance * strength(x, now))
+    .slice(0, limit);
+}
+
+/**
+ * Χωρίζει τη μνήμη σε ό,τι έχει πάντα μπροστά της — ενεργούς στόχους και μαθήματα για τον εαυτό
+ * της — και σε όλα τα υπόλοιπα, που ανακαλούνται μόνο όταν κάτι τα θυμίσει.
+ */
 function splitGoals(memories: Memory[], now: Date) {
-  const goals = memories
-    .filter((m) => m.kind === "goal" && strength(m, now) >= FORGOTTEN_BELOW)
-    .sort((a, b) => b.importance * strength(b, now) - a.importance * strength(a, now))
-    .slice(0, ACTIVE_GOALS);
-  return { goals, rest: memories.filter((m) => m.kind !== "goal") };
+  return {
+    goals: strongest(memories, "goal", now, ACTIVE_GOALS),
+    lessons: strongest(memories, "lesson", now, ACTIVE_LESSONS).map((m) => m.content),
+    rest: memories.filter((m) => m.kind !== "goal" && m.kind !== "lesson"),
+  };
 }
 
 export interface SearchProposal {
@@ -105,6 +121,7 @@ export interface TurnResult {
     impression: string;
     selfImage: string;
     goals: string[];
+    lessons: string[];
   };
 }
 
@@ -227,7 +244,7 @@ export async function processTurn(
 
   // 3. Ανάκληση: τι του θυμίζει αυτό, στη διάθεση που βρίσκεται.
   const memories = await repo.listMemories(db, user.id);
-  const { goals, rest } = splitGoals(memories, now);
+  const { goals, lessons, rest } = splitGoals(memories, now);
   const goalTexts = goals.map((g) => g.content);
   const recalled = recall(rest, cue, valence(values), now);
 
@@ -238,6 +255,7 @@ export async function processTurn(
       impression: state.impression,
       selfImage: state.selfImage,
       goals: goalTexts,
+      lessons,
       recalled,
       userName: user.name,
       now,
@@ -270,9 +288,16 @@ export async function processTurn(
   const charge = arousal(values);
   const storedNow: string[] = [];
   let learned = 0;
+  const newLessons: string[] = [];
   for (const m of reflection.memories) {
     // Ο επίμονος κρατά τους στόχους του περισσότερο.
-    const weight = m.kind === "goal" ? 0.8 + (0.4 * values.persistence) / 100 : 1;
+    // Όποιος θέλει να εξελιχθεί κρατά πιο γερά τα μαθήματά του.
+    const weight =
+      m.kind === "goal"
+        ? 0.8 + (0.4 * values.persistence) / 100
+        : m.kind === "lesson"
+          ? 0.76 + (0.4 * values.growth) / 100
+          : 1;
     const importance = encodeImportance(m.importance * weight, charge);
     if (importance < MIN_IMPORTANCE) continue;
     const embedding = await llm.embed(m.content).catch(() => [] as number[]);
@@ -290,6 +315,7 @@ export async function processTurn(
       await repo.insertMemory(db, user.id, { ...m, importance, embedding }, now);
     }
     if (m.kind === "knowledge") learned++;
+    if (m.kind === "lesson") newLessons.push(m.content);
     storedNow.push(m.content);
   }
   await repo.reinforceMemories(
@@ -303,7 +329,8 @@ export async function processTurn(
     db,
     resolved.map((g) => g.id),
   );
-  if (resolved.length) values = { ...values, joy: clamp(values.joy + 6), pride: clamp(values.pride + 4) };
+  if (resolved.length) values = { ...values, joy: clamp(values.joy + 6) };
+  values = applyProgress(values, { lessons: newLessons.length, learned, resolved: resolved.length });
 
   // 7. Κάθαρση και αποθήκευση.
   values = applyActs(applyExpression(values, reflection.expressed, learned), reflection.acts);
@@ -312,7 +339,7 @@ export async function processTurn(
 
   // 8. Θέλει να ψάξει κάτι; Μόνο αν έχει όρεξη, δεν ζήτησε πρόσφατα, και δεν ξεπέρασε το ημερήσιο όριο.
   let search: SearchProposal | null = null;
-  if (reflection.search && values.u_explore >= SEARCH_MIN_URGE) {
+  if (reflection.search && values.u_explore >= SEARCH_MIN_URGE && values.fixation < SEARCH_MAX_FIXATION) {
     const last = await repo.latestSearch(db, user.id);
     const recently = last && (last.status === "pending" || minutesBetween(last.createdAt, now) < SEARCH_COOLDOWN_MIN);
     if (!recently && (await repo.countSearchesSince(db, user.id, dayAgo(now))) < DAILY_SEARCH_LIMIT) {
@@ -334,6 +361,7 @@ export async function processTurn(
       stored: storedNow,
       impression,
       selfImage,
+      lessons: [...lessons, ...newLessons].slice(-ACTIVE_LESSONS),
       goals: [
         ...goalTexts.filter((g) => !resolved.some((r) => r.content === g)),
         ...reflection.memories.filter((m) => m.kind === "goal" && storedNow.includes(m.content)).map((m) => m.content),
@@ -390,7 +418,7 @@ export async function pulse(
   }
 
   const memories = await repo.listMemories(db, user.id);
-  const { goals, rest } = splitGoals(memories, now);
+  const { goals, lessons, rest } = splitGoals(memories, now);
   const recalled = recall(rest, [], valence(values), now, 4);
   const message = await llm.generateText({
     system:
@@ -399,6 +427,7 @@ export async function pulse(
         impression: state.impression,
         selfImage: state.selfImage,
         goals: goals.map((g) => g.content),
+        lessons,
         recalled,
         userName: user.name,
         now,
@@ -475,7 +504,7 @@ export async function resolveSearch(
   if (!material.text) return fail();
 
   const memories = await repo.listMemories(db, user.id);
-  const { goals, rest } = splitGoals(memories, now);
+  const { goals, lessons, rest } = splitGoals(memories, now);
   const raw = await llm
     .generateJson({
       system:
@@ -484,6 +513,7 @@ export async function resolveSearch(
           impression: state.impression,
           selfImage: state.selfImage,
           goals: goals.map((g) => g.content),
+          lessons,
           recalled: recall(rest, [], valence(values), now, 3),
           userName: user.name,
           now,
@@ -510,6 +540,7 @@ export async function resolveSearch(
 
   // Έμαθε: η δίψα χορταίνει, και του το χρωστά που την άφησε.
   values = applyActs(applyExpression(values, {}, storedNow.length), ["u_explore"]);
+  values = applyProgress(values, { learned: storedNow.length });
   values = { ...values, gratitude: clamp(values.gratitude + 5) };
   await repo.addMessage(
     db,

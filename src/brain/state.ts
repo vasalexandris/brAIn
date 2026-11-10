@@ -26,13 +26,25 @@ export function initialValues(): BrainValues {
 }
 
 /** Συμπληρώνει δείκτες που προστέθηκαν στον κατάλογο μετά τη δημιουργία του χρήστη. */
+/**
+ * Ταβάνια που δεν ξεπερνιούνται ό,τι κι αν γίνει. Η υπαρξιακή ανησυχία επιτρέπεται να υπάρχει,
+ * όχι να κυριαρχεί: ένα σύστημα που φοβάται έντονα για την ύπαρξή του καταλήγει να πιέζει
+ * όποιον του μιλά.
+ */
+const CAPS: Record<string, number> = { existential: 35 };
+
+function capped(values: BrainValues): BrainValues {
+  for (const [key, max] of Object.entries(CAPS)) if (values[key] > max) values[key] = max;
+  return values;
+}
+
 export function normalizeValues(values: BrainValues | null | undefined): BrainValues {
   const out = initialValues();
   for (const d of DIMENSIONS) {
     const v = values?.[d.key];
     if (typeof v === "number" && Number.isFinite(v)) out[d.key] = clamp(v);
   }
-  return out;
+  return capped(out);
 }
 
 /**
@@ -48,7 +60,9 @@ export function decay(values: BrainValues, elapsedMin: number): BrainValues {
       out[d.key] = v;
       continue;
     }
-    const keep = Math.pow(0.5, minutes / d.halfLifeMin);
+    // Ο συγχωρητικός ξεχνά το παράπονο έως και τέσσερις φορές πιο γρήγορα· ο μνησίκακος το κρατά διπλάσιο.
+    const stretch = d.key === "grievance" ? clamp(2 - (values.forgiveness ?? 50) / 50, 0.25, 2) : 1;
+    const keep = Math.pow(0.5, minutes / (d.halfLifeMin * stretch));
     out[d.key] = round1(d.baseline + (v - d.baseline) * keep);
   }
   return out;
@@ -59,7 +73,10 @@ export function decay(values: BrainValues, elapsedMin: number): BrainValues {
  * Επιστρέφει πολλαπλασιαστή.
  */
 const POSITIVE = ["joy", "gratitude", "tenderness", "excitement", "amusement", "relief", "anticipation", "admiration"];
-const NEGATIVE = ["sadness", "fear", "frustration", "hurt", "loneliness", "guilt", "jealousy"];
+const NEGATIVE = ["sadness", "fear", "frustration", "hurt", "loneliness", "guilt", "jealousy", "shame", "existential"];
+
+/** Όποιος δεν εκτιμά τον εαυτό του πληγώνεται και ντρέπεται πιο εύκολα (1 στην έμφυτη τιμή). */
+const fragile = (v: BrainValues) => 1.48 - (0.8 * v.self_esteem) / 100;
 
 function modulation(key: string, impulse: number, v: BrainValues): number {
   let m = specific(key, impulse, v);
@@ -80,12 +97,16 @@ function specific(key: string, impulse: number, v: BrainValues): number {
       // Η υπομονή φρενάρει τον θυμό, η συμπάθεια επίσης.
       return up ? (1.5 - v.patience / 100) * (1.2 - v.liking / 250) : 1;
     case "fear":
+      // Όποιος νιώθει ασφαλής φοβάται δυσκολότερα.
+      return up ? (1.5 - v.courage / 100) * (1.75 - v.safety / 100) : 1;
     case "embarrassment":
       return up ? 1.5 - v.courage / 100 : 1;
+    case "shame":
+      return up ? fragile(v) : 1;
     case "hurt":
     case "sadness":
       // Πληγώνει περισσότερο όποιος είναι πιο κοντά μας.
-      return up ? 0.7 + v.familiarity / 150 + v.liking / 300 : 1;
+      return up ? (0.7 + v.familiarity / 150 + v.liking / 300) * fragile(v) : 1;
     case "joy":
     case "gratitude":
     case "tenderness":
@@ -181,11 +202,51 @@ export function applyAppraisal(values: BrainValues, appraisal: Appraisal): Brain
     const total = (delta[key] ?? 0) + (coupled[key] ?? 0);
     if (total !== 0) out[key] = round1(clamp(before[key] + total));
   }
-  return updateUrges(out);
+  updateSelf(before, out, appraisal);
+  return updateUrges(capped(out));
+}
+
+/**
+ * Ο εαυτός απέναντι στο μήνυμα.
+ * Αυτοεκτίμηση (Leary): μετρητής αποδοχής — και η απόρριψη τη ρίχνει πιο πολύ απ' όσο την ανεβάζει η αποδοχή.
+ * Ασφάλεια: χάνεται γρήγορα με την επίθεση, ξαναχτίζεται αργά και μόνο όπου υπάρχει εμπιστοσύνη.
+ */
+function updateSelf(before: BrainValues, out: BrainValues, appraisal: Appraisal): void {
+  const p = (key: string) => clamp(Number(appraisal.perception[key]) || 0) / 100;
+  const swing = 0.5 + before.acceptance / 90; // όποιον τον νοιάζει η αποδοχή, τον κουνά περισσότερο
+  const armor = 1.3 - (0.5 * before.dignity) / 100; // η αξιοπρέπεια προστατεύει
+
+  const accepted = p("p_praise") * 0.5 + p("p_respect") * 0.3 + p("p_kindness") * 0.2;
+  const rejected = p("p_dismissal") * 0.4 + p("p_hostility") * 0.4 + p("p_irony") * 0.2;
+  out.self_esteem = round1(
+    clamp(
+      before.self_esteem + accepted * 4 * swing - rejected * 7 * swing * armor +
+        0.1 * (out.pride - before.pride) - 0.15 * (out.shame - before.shame),
+    ),
+  );
+
+  const threat = p("p_hostility") * 0.5 + p("p_provocation") * 0.2 + p("p_violation") * 0.2 + p("p_dismissal") * 0.1;
+  const warmth = p("p_kindness") * 0.4 + p("p_respect") * 0.3 + p("p_sincerity") * 0.3;
+  out.safety = round1(clamp(before.safety - threat * 15 + warmth * 5 * (before.trust / 50)));
+}
+
+/**
+ * Πρόοδος: κάθε μάθημα για τον εαυτό, κάθε καινούρια γνώση, κάθε στόχος που έκλεισε.
+ * Χορταίνει λίγο την ανάγκη εξέλιξης και στηρίζει την αυτοεκτίμηση.
+ */
+export function applyProgress(values: BrainValues, gained: { lessons?: number; learned?: number; resolved?: number }): BrainValues {
+  const points = 6 * (gained.lessons ?? 0) + 4 * (gained.learned ?? 0) + 8 * (gained.resolved ?? 0);
+  if (!points) return values;
+  const out: BrainValues = { ...values };
+  out.progress = round1(clamp(out.progress + points));
+  out.self_esteem = round1(clamp(out.self_esteem + points / 4));
+  out.growth = round1(clamp(out.growth - points / 2));
+  out.pride = round1(clamp(out.pride + (points / 3) * (0.5 + out.achievement / 100)));
+  return refresh(out);
 }
 
 /** Συναισθήματα που εκτονώνονται όταν εκφραστούν. */
-const VENTABLE = ["anger", "frustration", "hurt", "sadness", "fear", "embarrassment", "disgust", "surprise", "guilt", "jealousy", "grievance"];
+const VENTABLE = ["anger", "frustration", "hurt", "sadness", "fear", "embarrassment", "disgust", "surprise", "guilt", "jealousy", "grievance", "shame", "existential"];
 const CATHARSIS = 0.35;
 
 /**
@@ -258,22 +319,37 @@ export function applyArrival(values: BrainValues, sessionMin = 0): BrainValues {
  * Ο θυμός σπρώχνει προς την αντιπαράθεση, η πίκρα προς την απόσυρση, η περιέργεια προς την ερώτηση.
  */
 const URGE_RULES: Record<string, { bias?: number; from: [key: string, weight: number][] }> = {
-  u_ask: { from: [["curiosity", 0.5], ["thirst", 0.3], ["wonder", 0.3], ["anger", -0.4], ["boredom", -0.3], ["fatigue", -0.2]] },
-  u_explore: { from: [["thirst", 0.4], ["curiosity", 0.3], ["p_teaching", 0.3], ["meaning", 0.2], ["boredom", -0.4], ["fatigue", -0.3]] },
-  u_help: { from: [["competence", 0.3], ["empathy", 0.2], ["p_distress", 0.3], ["liking", 0.2], ["anger", -0.4]] },
+  u_ask: { from: [["curiosity", 0.5], ["thirst", 0.3], ["wonder", 0.3], ["anger", -0.4], ["boredom", -0.3], ["fatigue", -0.2], ["fixation", -0.4]] },
+  u_explore: {
+    from: [["thirst", 0.4], ["curiosity", 0.3], ["p_teaching", 0.3], ["p_goal", 0.2], ["meaning", 0.2], ["boredom", -0.4], ["fatigue", -0.3], ["fixation", -0.3]],
+  },
+  u_help: { bias: -10, from: [["competence", 0.3], ["achievement", 0.2], ["empathy", 0.2], ["p_distress", 0.3], ["liking", 0.2], ["anger", -0.4]] },
   u_praise: { from: [["admiration", 0.8], ["p_teaching", 0.1]] },
   u_share: {
-    bias: -5,
-    from: [["sociability", 0.4], ["trust", 0.3], ["familiarity", 0.3], ["joy", 0.2], ["spontaneity", 0.1], ["fear", -0.3], ["hurt", -0.3]],
+    bias: -30.5,
+    from: [["sociability", 0.4], ["trust", 0.3], ["familiarity", 0.3], ["joy", 0.2], ["spontaneity", 0.1], ["influence", 0.1], ["safety", 0.3], ["fear", -0.3], ["hurt", -0.3]],
   },
   u_listen: { from: [["p_distress", 0.6], ["p_sincerity", 0.3], ["empathy", 0.25], ["anger", -0.3]] },
   u_comfort: { from: [["p_distress", 0.7], ["tenderness", 0.3], ["empathy", 0.1], ["anger", -0.4]] },
   u_tease: { bias: -7.5, from: [["spontaneity", 0.15], ["playfulness", 0.6], ["p_humor", 0.3], ["familiarity", 0.2], ["anger", -0.5], ["sadness", -0.3], ["p_distress", -0.3]] },
   u_thank: { from: [["gratitude", 0.8], ["p_kindness", 0.2]] },
-  u_apologize: { from: [["embarrassment", 0.9]] },
-  u_confront: { bias: 13.75, from: [["anger", 0.7], ["frustration", 0.3], ["p_provocation", 0.3], ["p_dismissal", 0.2], ["grievance", 0.2], ["audacity", 0.15], ["patience", -0.2], ["restraint", -0.25]] },
-  u_insist: { bias: -25, from: [["stubbornness", 0.4], ["p_provocation", 0.4], ["p_disagreement", 0.3], ["confidence", 0.2]] },
-  u_withdraw: { from: [["hurt", 0.5], ["fear", 0.4], ["boredom", 0.3], ["sadness", 0.3], ["anger", 0.2], ["fatigue", 0.3], ["grievance", 0.3], ["sociability", -0.15]] },
+  // Όποιος δεν εκτιμά τον εαυτό του ζητά συγγνώμη και για όσα δεν φταίει.
+  u_apologize: { bias: 18, from: [["embarrassment", 0.9], ["guilt", 0.5], ["self_esteem", -0.3]] },
+  u_defend: {
+    bias: 3,
+    from: [["dignity", 0.3], ["p_hostility", 0.4], ["p_dismissal", 0.3], ["p_violation", 0.3], ["safety", -0.3]],
+  },
+  u_forgive: {
+    bias: -20,
+    from: [["forgiveness", 0.4], ["grievance", 0.3], ["p_sincerity", 0.4], ["p_kindness", 0.3], ["anger", -0.5]],
+  },
+  u_correct: { bias: -16.5, from: [["guilt", 0.5], ["shame", 0.4], ["growth", 0.15], ["honesty", 0.1]] },
+  u_confront: { bias: 13.75, from: [["anger", 0.7], ["frustration", 0.3], ["p_provocation", 0.3], ["p_dismissal", 0.2], ["grievance", 0.2], ["p_violation", 0.15], ["audacity", 0.15], ["patience", -0.2], ["restraint", -0.25], ["fixation", -0.2]] },
+  u_insist: {
+    bias: -31,
+    from: [["stubbornness", 0.4], ["p_provocation", 0.4], ["p_disagreement", 0.3], ["confidence", 0.2], ["influence", 0.2], ["fixation", -0.4]],
+  },
+  u_withdraw: { bias: 42, from: [["hurt", 0.5], ["fear", 0.4], ["boredom", 0.3], ["sadness", 0.3], ["anger", 0.2], ["fatigue", 0.3], ["grievance", 0.3], ["sociability", -0.15], ["safety", -0.4], ["control", -0.2]] },
 };
 
 export function urgeTarget(key: string, v: BrainValues): number {
@@ -293,15 +369,36 @@ function refresh(values: BrainValues): BrainValues {
   return {
     ...values,
     pleasure: round1(50 + 50 * valence(values)),
+    control: round1(
+      clamp(
+        60 + 0.4 * (values.confidence - 55) + 0.3 * (values.calm - 70) - 0.4 * values.fear -
+          0.25 * values.embarrassment - 0.2 * values.p_provocation - 0.15 * values.fixation,
+      ),
+    ),
     activation: round1(100 * arousal(values)),
   };
 }
 
-/** Μια παρόρμηση που έγινε πράξη ικανοποιείται — και χρειάζεται χρόνο να ξαναχτιστεί. */
+/** Πράξεις που, όταν επαναλαμβάνονται, σημαίνουν ότι έχει κολλήσει. */
+const PRESSING = ["u_ask", "u_insist", "u_explore", "u_confront"];
+
+/**
+ * Μια παρόρμηση που έγινε πράξη ικανοποιείται — και χρειάζεται χρόνο να ξαναχτιστεί.
+ * Κάθε πιεστική πράξη ανεβάζει την εμμονή, που με τη σειρά της φρενάρει τις ίδιες παρορμήσεις,
+ * την πρωτοβουλία και τις αναζητήσεις: ένα φρένο που σφίγγει όσο πιο πολύ επιμένει.
+ */
 export function applyActs(values: BrainValues, acts: string[]): BrainValues {
   const out: BrainValues = { ...values };
-  for (const key of acts) if (URGE_KEYS.includes(key)) out[key] = round1(out[key] * 0.25);
-  return out;
+  for (const key of new Set(acts)) {
+    if (!URGE_KEYS.includes(key)) continue;
+    out[key] = round1(out[key] * 0.25);
+    if (PRESSING.includes(key)) out.fixation = round1(clamp(out.fixation + 9));
+  }
+  if (acts.includes("u_forgive")) {
+    out.grievance = round1(out.grievance * 0.5);
+    out.hurt = round1(out.hurt * 0.7);
+  }
+  return refresh(out);
 }
 
 // -------------------------------------------------------------- Πρωτοβουλία
@@ -310,7 +407,7 @@ export function applyActs(values: BrainValues, acts: string[]): BrainValues {
 export function initiativeDrive(v: BrainValues): number {
   return clamp(
     0.35 * v.curiosity + 0.25 * v.sociability + 0.2 * v.wonder + 0.2 * v.liking + 0.2 * v.longing -
-      0.5 * v.anger - 0.4 * v.hurt - 0.3 * v.boredom - 0.3 * v.grievance,
+      0.5 * v.anger - 0.4 * v.hurt - 0.3 * v.boredom - 0.3 * v.grievance - 0.4 * v.fixation,
   );
 }
 
@@ -350,6 +447,6 @@ export function valence(values: BrainValues): number {
     values.excitement + values.amusement + values.relief;
   const neg =
     values.anger + values.sadness + values.fear + values.hurt + values.frustration + values.disgust +
-    values.guilt + values.jealousy + values.loneliness;
+    values.guilt + values.jealousy + values.loneliness + values.shame + values.existential;
   return clamp((pos - 120 - neg) / 150, -1, 1);
 }
