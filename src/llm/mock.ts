@@ -91,8 +91,13 @@ export class MockProvider implements LlmProvider {
       memories.push({ kind: "lesson", content: "Την επόμενη φορά θα ακούσω πριν αντιδράσω.", importance: 60, valence: -10 });
     }
     const asks = /τι είναι (?:η |ο |το |οι |τα )?([^;?.!]+)/i.exec(user);
+    const wantsNews = strip(user).includes("ειδησ");
     return {
-      search: asks ? { source: "wikipedia", query: asks[1].trim() } : null,
+      search: wantsNews
+        ? { source: "news", query: "ειδήσεις σήμερα", committed: true }
+        : asks
+          ? { source: "wikipedia", query: asks[1].trim(), committed: false }
+          : null,
       resolved_goals: explained ? [1] : [],
       self_image: explained ? "Μου αρέσει να καταλαβαίνω γιατί οι άνθρωποι αγαπούν αυτά που αγαπούν." : "",
       expressed: { anger: has(reply, ["σταματα", "δεν μου αρεσει"]) ? 80 : 0 },

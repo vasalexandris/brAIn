@@ -154,7 +154,12 @@ interface Reflection {
   resolvedGoals: number[];
   impression: string;
   selfImage: string;
-  search: { source: Source; query: string } | null;
+  search: { source: Source; query: string; committed: boolean } | null;
+}
+
+/** Πόσες ερωτήσεις έχει ένα κείμενο (ελληνικό ή λατινικό ερωτηματικό). */
+export function countQuestions(text: string): number {
+  return (text.match(/[;\u037e?]/g) ?? []).length;
 }
 
 function parseReflection(raw: unknown): Reflection {
@@ -178,7 +183,11 @@ function parseReflection(raw: unknown): Reflection {
     selfImage: typeof r.self_image === "string" ? r.self_image.trim().slice(0, 800) : "",
     search:
       isRecord(r.search) && typeof r.search.query === "string" && r.search.query.trim()
-        ? { source: r.search.source === "news" ? "news" : "wikipedia", query: r.search.query.trim().slice(0, 120) }
+        ? {
+            source: r.search.source === "news" ? "news" : "wikipedia",
+            query: r.search.query.trim().slice(0, 120),
+            committed: r.search.committed === true,
+          }
         : null,
   };
 }
@@ -333,15 +342,29 @@ export async function processTurn(
   values = applyProgress(values, { lessons: newLessons.length, learned, resolved: resolved.length });
 
   // 7. Κάθαρση και αποθήκευση.
-  values = applyActs(applyExpression(values, reflection.expressed, learned), reflection.acts);
+  // Το αν ρώτησε δεν το αφήνουμε στην κρίση του μοντέλου: το μετράμε. Κάθε επιπλέον ερώτηση
+  // πέρα από την πρώτη ανεβάζει την εμμονή.
+  const questions = countQuestions(reply);
+  const acts = questions > 0 ? [...reflection.acts, "u_ask"] : reflection.acts;
+  values = applyActs(applyExpression(values, reflection.expressed, learned), acts);
+  if (questions > 1) values = { ...values, fixation: clamp(values.fixation + 5 * Math.min(questions - 1, 3)) };
   const impression = reflection.impression || state.impression;
   const selfImage = reflection.selfImage || state.selfImage;
 
   // 8. Θέλει να ψάξει κάτι; Μόνο αν έχει όρεξη, δεν ζήτησε πρόσφατα, και δεν ξεπέρασε το ημερήσιο όριο.
   let search: SearchProposal | null = null;
-  if (reflection.search && values.u_explore >= SEARCH_MIN_URGE && values.fixation < SEARCH_MAX_FIXATION) {
+  // Όταν το ζήτησε ο συνομιλητής ή το είπε η ίδια στην απάντησή της, οι φραγμοί όρεξης, εμμονής
+  // και αναμονής δεν ισχύουν: θα ήταν παράλογο να πει «να ψάξω;» και να μη φανεί η επιλογή.
+  const wanted =
+    reflection.search &&
+    (reflection.search.committed ||
+      (values.u_explore >= SEARCH_MIN_URGE && values.fixation < SEARCH_MAX_FIXATION));
+  if (reflection.search && wanted) {
     const last = await repo.latestSearch(db, user.id);
-    const recently = last && (last.status === "pending" || minutesBetween(last.createdAt, now) < SEARCH_COOLDOWN_MIN);
+    const recently =
+      last &&
+      (last.status === "pending" ||
+        (!reflection.search.committed && minutesBetween(last.createdAt, now) < SEARCH_COOLDOWN_MIN));
     if (!recently && (await repo.countSearchesSince(db, user.id, dayAgo(now))) < DAILY_SEARCH_LIMIT) {
       search = toProposal(await repo.createSearch(db, user.id, reflection.search.source, reflection.search.query, now));
     }
