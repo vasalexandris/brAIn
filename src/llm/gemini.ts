@@ -45,6 +45,22 @@ export class GeminiProvider implements LlmProvider {
     return { ...extra, ...thinking };
   }
 
+  /**
+   * Το Gemini θέλει η συζήτηση να αρχίζει με μήνυμα χρήστη και οι ρόλοι να εναλλάσσονται.
+   * Όταν ο εγκέφαλος μιλά δύο φορές στη σειρά (πρωτοβουλία), τα μηνύματα ενώνονται.
+   */
+  private static contents(messages: ChatMessage[]) {
+    const out: { role: "user" | "model"; parts: { text: string }[] }[] = [];
+    for (const m of messages) {
+      const role = m.role === "assistant" ? "model" : "user";
+      const last = out[out.length - 1];
+      if (!last && role === "model") continue;
+      if (last?.role === role) last.parts[0].text += `\n\n${m.content}`;
+      else out.push({ role, parts: [{ text: m.content }] });
+    }
+    return out;
+  }
+
   private static text(data: any): string {
     const candidate = data?.candidates?.[0];
     const text = (candidate?.content?.parts ?? [])
@@ -62,10 +78,7 @@ export class GeminiProvider implements LlmProvider {
     const model = this.opts.model;
     const data = await this.post(`${model}:generateContent`, {
       systemInstruction: { parts: [{ text: req.system }] },
-      contents: req.messages.map((m) => ({
-        role: m.role === "assistant" ? "model" : "user",
-        parts: [{ text: m.content }],
-      })),
+      contents: GeminiProvider.contents(req.messages),
       generationConfig: this.generationConfig(model, { temperature: req.temperature ?? 1 }),
     });
     return GeminiProvider.text(data).trim();

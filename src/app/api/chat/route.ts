@@ -1,15 +1,12 @@
 import { NextResponse } from "next/server";
 import { isApproved } from "@/auth/access";
 import { currentUser } from "@/auth/session";
+import { busy } from "@/brain/lock";
 import { processTurn } from "@/brain/pipeline";
 import { getDb } from "@/db";
 import { getLlm } from "@/llm";
 
 export const maxDuration = 60;
-
-// Ένας γύρος τη φορά ανά χρήστη: δύο ταυτόχρονα μηνύματα θα έγραφαν το ένα πάνω στην κατάσταση του άλλου.
-// (Ισχύει ανά διεργασία· για πολλούς servers θα χρειαστεί κλείδωμα στη βάση.)
-const busy = new Set<string>();
 
 export async function POST(req: Request) {
   const user = await currentUser();

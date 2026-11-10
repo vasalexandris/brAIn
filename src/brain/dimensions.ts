@@ -16,7 +16,9 @@ export type Category =
   | "mood" // διάθεση (αργή)
   | "drive" // ορμές / ορέξεις
   | "trait" // γνωρίσματα χαρακτήρα (πολύ αργά)
-  | "relationship"; // στάση απέναντι στον συγκεκριμένο άνθρωπο (μόνιμη)
+  | "relationship" // στάση απέναντι στον συγκεκριμένο άνθρωπο (μόνιμη)
+  | "time" // αίσθηση του χρόνου (υπολογίζεται από το ρολόι, όχι από το μοντέλο)
+  | "urge"; // παρορμήσεις: τι θέλει να ΚΑΝΕΙ τώρα (υπολογίζονται από τους άλλους δείκτες)
 
 export interface Dimension {
   key: string;
@@ -35,6 +37,8 @@ export const CATEGORY_LABELS: Record<Category, string> = {
   drive: "Ορμές",
   trait: "Γνωρίσματα χαρακτήρα",
   relationship: "Σχέση με τον συνομιλητή",
+  time: "Αίσθηση χρόνου",
+  urge: "Παρορμήσεις (τι θέλει να κάνει)",
 };
 
 const MIN = 1;
@@ -123,6 +127,29 @@ export const DIMENSIONS: Dimension[] = [
     ["familiarity", "οικειότητα", 5, "πόσο καλά τον ξέρει"],
     ["esteem", "εκτίμηση", 40, "πόσο τον εκτιμά ως άνθρωπο"],
   ]),
+
+  // Αίσθηση χρόνου: την κινεί το ρολόι (βλ. applyTime / applyArrival στο state.ts).
+  ...group("time", 10 * MIN, 100, [
+    ["presence", "παρουσία", 0, "πόσο ζωντανή είναι η κουβέντα αυτή τη στιγμή"],
+  ]),
+  ...group("time", 20 * MIN, 100, [
+    ["longing", "έλλειψη", 0, "πόσο του έλειψε η επαφή όσο κράτησε η σιωπή"],
+  ]),
+
+  // Παρορμήσεις: τα "ρήματα". Προκύπτουν από τους άλλους δείκτες (βλ. URGE_RULES στο state.ts)
+  // και εκτονώνονται όταν η πράξη γίνει.
+  ...group("urge", 15 * MIN, 100, [
+    ["u_ask", "να ρωτήσω", 60, "να κάνει μια ερώτηση"],
+    ["u_share", "να μοιραστώ", 35, "να πει κάτι δικό του: σκέψη, γνώμη, ανάμνηση"],
+    ["u_listen", "να ακούσω", 15, "να αφήσει τον άλλον να μιλήσει"],
+    ["u_comfort", "να παρηγορήσω", 10, "να στηρίξει τον συνομιλητή"],
+    ["u_tease", "να πειράξω", 20, "να κάνει πλάκα, να πειράξει"],
+    ["u_thank", "να ευχαριστήσω", 0, "να εκφράσει ευγνωμοσύνη"],
+    ["u_apologize", "να ζητήσω συγγνώμη", 0, "να παραδεχτεί λάθος"],
+    ["u_confront", "να αντιμιλήσω", 0, "να βάλει όριο, να απαντήσει στην πρόκληση"],
+    ["u_insist", "να επιμείνω", 0, "να κρατήσει τη θέση του"],
+    ["u_withdraw", "να αποσυρθώ", 0, "να κλειστεί, να μιλήσει λιγότερο"],
+  ]),
 ];
 
 export const DIMENSION_BY_KEY: Record<string, Dimension> = Object.fromEntries(
@@ -130,5 +157,8 @@ export const DIMENSION_BY_KEY: Record<string, Dimension> = Object.fromEntries(
 );
 
 export const PERCEPTION_KEYS = DIMENSIONS.filter((d) => d.category === "perception").map((d) => d.key);
-export const INNER_KEYS = DIMENSIONS.filter((d) => d.category !== "perception").map((d) => d.key);
+/** Οι δείκτες που μπορεί να σπρώξει η αντίληψη (το μοντέλο). Χρόνος και παρορμήσεις υπολογίζονται στον κώδικα. */
+const APPRAISED: Category[] = ["emotion", "mood", "drive", "trait", "relationship"];
+export const INNER_KEYS = DIMENSIONS.filter((d) => APPRAISED.includes(d.category)).map((d) => d.key);
+export const URGE_KEYS = DIMENSIONS.filter((d) => d.category === "urge").map((d) => d.key);
 export const EMOTION_KEYS = DIMENSIONS.filter((d) => d.category === "emotion").map((d) => d.key);
