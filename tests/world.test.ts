@@ -41,6 +41,16 @@ describe("παράθυρο στον κόσμο", () => {
     expect(m.titles[0]).toBe("Σεισμός 4,2 & μετασεισμοί");
   });
 
+  it("διαδίκτυο χωρίς αναζήτηση παρόχου: εφεδρικά, αναζήτηση ειδήσεων", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      urls.push(url);
+      return new Response(RSS);
+    });
+    await lookup("web", "αποτελέσματα NBA");
+    expect(new URL(urls[0]).host).toBe("www.bing.com");
+  });
+
   it("Wikipedia: πρώτα ελληνικά, αλλιώς αγγλικά, με σειρά συνάφειας και όριο μήκους", async () => {
     const hosts: string[] = [];
     vi.stubGlobal("fetch", async (url: string) => {

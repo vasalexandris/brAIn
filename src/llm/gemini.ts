@@ -94,6 +94,32 @@ export class GeminiProvider implements LlmProvider {
     return JSON.parse(GeminiProvider.text(data));
   }
 
+  /** Αναζήτηση Google μέσα από το Gemini (grounding), με το ίδιο κλειδί. */
+  async searchWeb(query: string): Promise<{ titles: string[]; text: string }> {
+    const model = this.opts.model;
+    const data = await this.post(`${model}:generateContent`, {
+      systemInstruction: {
+        parts: [
+          {
+            text: "Είσαι εργαλείο έρευνας. Ψάξε στο διαδίκτυο και ανάφερε τι βρήκες για το ερώτημα: γεγονότα, αριθμούς, ονόματα και ημερομηνίες ακριβώς όπως τα γράφουν οι πηγές. Αν δεν βρεις αυτό που ζητείται, γράψε καθαρά ότι δεν το βρήκες. Μην εικάζεις και μη συμπληρώνεις από μνήμης. Ελληνικά, έως 250 λέξεις, χωρίς σχόλια.",
+          },
+        ],
+      },
+      contents: [
+        { role: "user", parts: [{ text: `Σημερινή ημερομηνία: ${new Date().toISOString().slice(0, 10)}\nΕρώτημα: ${query}` }] },
+      ],
+      tools: [{ google_search: {} }],
+      generationConfig: this.generationConfig(model, { temperature: 0.1 }),
+    });
+    const chunks: any[] = data?.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
+    // Χωρίς πηγές δεν έγινε αναζήτηση: το κείμενο θα ήταν απλώς ό,τι "θυμάται" το μοντέλο.
+    if (!chunks.length) throw new Error("Το Gemini απάντησε χωρίς να ψάξει");
+    return {
+      titles: chunks.map((c) => c?.web?.title).filter((t): t is string => typeof t === "string").slice(0, 8),
+      text: GeminiProvider.text(data).trim(),
+    };
+  }
+
   async embed(text: string): Promise<number[]> {
     const data = await this.post(`${this.opts.embedModel}:embedContent`, {
       content: { parts: [{ text }] },

@@ -103,7 +103,11 @@ export function Chat({ initialMessages, initialValues, initialImpression, initia
         return;
       }
       if (!res.ok || !body?.reply) throw new Error(body?.error ?? "Κάτι πήγε στραβά. Δοκίμασε ξανά.");
-      setMessages((m) => [...m, { role: "assistant", content: body.reply }]);
+      setMessages((m) => [
+        ...m,
+        { role: "assistant", content: body.reply },
+        ...(body.extra ? [{ role: "assistant" as const, content: body.extra }] : []),
+      ]);
       setValues(body.values);
       setDebug(body.debug);
       setProposal(body.search ?? null);

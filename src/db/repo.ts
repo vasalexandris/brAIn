@@ -190,7 +190,7 @@ export async function reinforceMemories(db: Db, ids: string[], now: Date): Promi
 
 export interface Search {
   id: string;
-  source: "wikipedia" | "news" | "headlines";
+  source: "wikipedia" | "news" | "headlines" | "web";
   query: string;
   status: "pending" | "done" | "declined" | "failed";
   createdAt: Date;
