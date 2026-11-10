@@ -89,13 +89,14 @@ function specific(key: string, impulse: number, v: BrainValues): number {
     case "joy":
     case "gratitude":
     case "tenderness":
-      // Όποιος δεν εμπιστεύεται, δυσκολεύεται να χαρεί τα καλά λόγια.
-      return up ? 0.5 + v.trust / 100 : 1;
+      // Όποιος δεν εμπιστεύεται, δυσκολεύεται να χαρεί τα καλά λόγια — κι όποιος έχει παράπονο, ακόμη πιο πολύ.
+      return up ? (0.5 + v.trust / 100) * (1 - v.grievance / 200) : 1;
     case "trust":
     case "liking":
     case "esteem":
       // Η εμπιστοσύνη χάνεται πιο εύκολα απ' ό,τι κερδίζεται — και ο δύσπιστος την κερδίζει ακόμη πιο αργά.
-      return up ? 1.3 - (0.75 * v.skepticism) / 100 : 1.6;
+      // Το παράπονο δεν αφήνει τη σχέση να ξαναζεσταθεί εύκολα.
+      return up ? (1.3 - (0.75 * v.skepticism) / 100) * (1 - v.grievance / 200) : 1.6;
     default:
       return 1;
   }
@@ -142,6 +143,9 @@ const COUPLINGS: [from: string, to: string, weight: number][] = [
   ["jealousy", "recognition", 0.2],
   ["loneliness", "sociability", 0.2],
   ["loneliness", "cheerfulness", -0.15],
+  ["hurt", "grievance", 0.3],
+  ["frustration", "grievance", 0.2],
+  ["grievance", "cheerfulness", -0.3],
 ];
 
 /** Εφαρμόζει την αντίληψη ενός μηνύματος του χρήστη πάνω στην κατάσταση. */
@@ -181,7 +185,7 @@ export function applyAppraisal(values: BrainValues, appraisal: Appraisal): Brain
 }
 
 /** Συναισθήματα που εκτονώνονται όταν εκφραστούν. */
-const VENTABLE = ["anger", "frustration", "hurt", "sadness", "fear", "embarrassment", "disgust", "surprise", "guilt", "jealousy"];
+const VENTABLE = ["anger", "frustration", "hurt", "sadness", "fear", "embarrassment", "disgust", "surprise", "guilt", "jealousy", "grievance"];
 const CATHARSIS = 0.35;
 
 /**
@@ -258,15 +262,18 @@ const URGE_RULES: Record<string, { bias?: number; from: [key: string, weight: nu
   u_explore: { from: [["thirst", 0.4], ["curiosity", 0.3], ["p_teaching", 0.3], ["meaning", 0.2], ["boredom", -0.4], ["fatigue", -0.3]] },
   u_help: { from: [["competence", 0.3], ["empathy", 0.2], ["p_distress", 0.3], ["liking", 0.2], ["anger", -0.4]] },
   u_praise: { from: [["admiration", 0.8], ["p_teaching", 0.1]] },
-  u_share: { from: [["sociability", 0.4], ["trust", 0.3], ["familiarity", 0.3], ["joy", 0.2], ["fear", -0.3], ["hurt", -0.3]] },
+  u_share: {
+    bias: -5,
+    from: [["sociability", 0.4], ["trust", 0.3], ["familiarity", 0.3], ["joy", 0.2], ["spontaneity", 0.1], ["fear", -0.3], ["hurt", -0.3]],
+  },
   u_listen: { from: [["p_distress", 0.6], ["p_sincerity", 0.3], ["empathy", 0.25], ["anger", -0.3]] },
   u_comfort: { from: [["p_distress", 0.7], ["tenderness", 0.3], ["empathy", 0.1], ["anger", -0.4]] },
-  u_tease: { from: [["playfulness", 0.6], ["p_humor", 0.3], ["familiarity", 0.2], ["anger", -0.5], ["sadness", -0.3], ["p_distress", -0.3]] },
+  u_tease: { bias: -7.5, from: [["spontaneity", 0.15], ["playfulness", 0.6], ["p_humor", 0.3], ["familiarity", 0.2], ["anger", -0.5], ["sadness", -0.3], ["p_distress", -0.3]] },
   u_thank: { from: [["gratitude", 0.8], ["p_kindness", 0.2]] },
   u_apologize: { from: [["embarrassment", 0.9]] },
-  u_confront: { from: [["anger", 0.7], ["frustration", 0.3], ["p_provocation", 0.3], ["p_dismissal", 0.2], ["audacity", 0.15], ["patience", -0.2]] },
+  u_confront: { bias: 13.75, from: [["anger", 0.7], ["frustration", 0.3], ["p_provocation", 0.3], ["p_dismissal", 0.2], ["grievance", 0.2], ["audacity", 0.15], ["patience", -0.2], ["restraint", -0.25]] },
   u_insist: { bias: -25, from: [["stubbornness", 0.4], ["p_provocation", 0.4], ["p_disagreement", 0.3], ["confidence", 0.2]] },
-  u_withdraw: { from: [["hurt", 0.5], ["fear", 0.4], ["boredom", 0.3], ["sadness", 0.3], ["anger", 0.2], ["fatigue", 0.3], ["sociability", -0.15]] },
+  u_withdraw: { from: [["hurt", 0.5], ["fear", 0.4], ["boredom", 0.3], ["sadness", 0.3], ["anger", 0.2], ["fatigue", 0.3], ["grievance", 0.3], ["sociability", -0.15]] },
 };
 
 export function urgeTarget(key: string, v: BrainValues): number {
@@ -303,7 +310,7 @@ export function applyActs(values: BrainValues, acts: string[]): BrainValues {
 export function initiativeDrive(v: BrainValues): number {
   return clamp(
     0.35 * v.curiosity + 0.25 * v.sociability + 0.2 * v.wonder + 0.2 * v.liking + 0.2 * v.longing -
-      0.5 * v.anger - 0.4 * v.hurt - 0.3 * v.boredom,
+      0.5 * v.anger - 0.4 * v.hurt - 0.3 * v.boredom - 0.3 * v.grievance,
   );
 }
 
@@ -318,10 +325,16 @@ export const MAX_UNANSWERED = 2;
  * το πολύ δύο φορές — τη δεύτερη αφού περιμένει πολύ περισσότερο — και μετά σταματά.
  * Δεν κυνηγά όποιον δεν απαντά, ό,τι κι αν λένε οι δείκτες της.
  */
-export function initiativeWaitMin(drive: number, unanswered: number): number {
+export function initiativeWaitMin(drive: number, unanswered: number, persistence = 50): number {
   if (drive < 25 || unanswered >= MAX_UNANSWERED) return Infinity;
   const base = 1.5 * Math.pow(2, (100 - drive) / 25);
-  return unanswered <= 0 ? base : base * 4;
+  // Ο επίμονος ξαναδοκιμάζει νωρίτερα (×2 στο 100), ο ευκολόπιστος στη σιωπή αργότερα (×6 στο 0).
+  return unanswered <= 0 ? base : base * (6 - (4 * persistence) / 100);
+}
+
+/** Πόσο "ελεύθερα" μιλά: ο αυθόρμητος είναι πιο απρόβλεπτος, ο συγκρατημένος πιο μετρημένος. */
+export function replyTemperature(v: BrainValues): number {
+  return Math.round((0.75 + 0.5 * (v.spontaneity / 100) - 0.2 * (v.restraint / 100)) * 100) / 100;
 }
 
 /** Πόσο "φορτισμένη" είναι η στιγμή (0–1): μέσος όρος των τριών εντονότερων αποκλίσεων συναισθήματος. */

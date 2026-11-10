@@ -43,6 +43,7 @@ import {
   clamp,
   initiativeDrive,
   initiativeWaitMin,
+  replyTemperature,
   valence,
   type Appraisal,
   type BrainValues,
@@ -243,7 +244,7 @@ export async function processTurn(
       time,
     }),
     messages: [...history, { role: "user", content: message }],
-    temperature: 0.9,
+    temperature: replyTemperature(values),
   });
 
   // 5. Αναστοχασμός: τι εξέφρασα, τι αξίζει να θυμάμαι, άλλαξε η γνώμη μου;
@@ -270,7 +271,9 @@ export async function processTurn(
   const storedNow: string[] = [];
   let learned = 0;
   for (const m of reflection.memories) {
-    const importance = encodeImportance(m.importance, charge);
+    // Ο επίμονος κρατά τους στόχους του περισσότερο.
+    const weight = m.kind === "goal" ? 0.8 + (0.4 * values.persistence) / 100 : 1;
+    const importance = encodeImportance(m.importance * weight, charge);
     if (importance < MIN_IMPORTANCE) continue;
     const embedding = await llm.embed(m.content).catch(() => [] as number[]);
     const twin = memories.find(
@@ -375,7 +378,7 @@ export async function pulse(
   const unanswered = Math.max(0, trailing - 1);
 
   let values = applyTime(state.values, minutesBetween(state.updatedAt, now), time.silenceMin);
-  const waitMin = initiativeWaitMin(initiativeDrive(values), unanswered);
+  const waitMin = initiativeWaitMin(initiativeDrive(values), unanswered, values.persistence);
   if (!Number.isFinite(waitMin)) return idle;
   if (quietMin < waitMin) {
     return { message: null, values: null, nextInSec: Math.ceil((waitMin - quietMin) * 60) + 1 };
@@ -403,7 +406,7 @@ export async function pulse(
       }) +
       initiativeBlock(quietMin, unanswered),
     messages: [...stored.map((m) => ({ role: m.role, content: m.content })), { role: "user", content: silenceTurn(quietMin) }],
-    temperature: 1,
+    temperature: replyTemperature(values),
   });
 
   // Είπε αυτό που ήθελε: οι παρορμήσεις που την έσπρωξαν ικανοποιούνται.
@@ -411,7 +414,7 @@ export async function pulse(
   await repo.addMessage(db, user.id, "assistant", message, { values, proactive: true }, now);
   await repo.saveBrainState(db, user.id, { ...state, values, updatedAt: now }, now);
 
-  const nextWait = initiativeWaitMin(initiativeDrive(values), unanswered + 1);
+  const nextWait = initiativeWaitMin(initiativeDrive(values), unanswered + 1, values.persistence);
   return { message, values, nextInSec: Number.isFinite(nextWait) ? Math.ceil(nextWait * 60) + 1 : null };
 }
 
