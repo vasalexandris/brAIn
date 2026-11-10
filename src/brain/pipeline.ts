@@ -20,10 +20,13 @@ import {
   type Memory,
   type MemoryKind,
 } from "./memory";
+import { SOURCE_LABELS, lookup as defaultLookup, type Lookup, type Source } from "./world";
 import {
   PERCEIVE_SYSTEM,
   REFLECT_SYSTEM,
   initiativeBlock,
+  materialPrompt,
+  readingBlock,
   perceivePrompt,
   reflectPrompt,
   respondSystem,
@@ -51,6 +54,11 @@ import {
  */
 export const DAILY_MESSAGE_LIMIT = Number(process.env.DAILY_MESSAGE_LIMIT) || 200;
 const DAILY_INITIATIVE_LIMIT = 6;
+export const DAILY_SEARCH_LIMIT = 20;
+/** Μετά από μια πρόταση αναζήτησης (όπως κι αν κατέληξε) δεν ξαναπροτείνει για τόσα λεπτά. */
+const SEARCH_COOLDOWN_MIN = 10;
+/** Κάτω από τόση όρεξη «να εμβαθύνω» δεν ζητά να ψάξει. */
+const SEARCH_MIN_URGE = 40;
 const dayAgo = (now: Date) => new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
 export class DailyLimitError extends Error {}
@@ -70,9 +78,25 @@ function splitGoals(memories: Memory[], now: Date) {
   return { goals, rest: memories.filter((m) => m.kind !== "goal") };
 }
 
+export interface SearchProposal {
+  id: string;
+  source: Source;
+  sourceLabel: string;
+  query: string;
+}
+
+export const toProposal = (s: repo.Search): SearchProposal => ({
+  id: s.id,
+  source: s.source,
+  sourceLabel: SOURCE_LABELS[s.source],
+  query: s.query,
+});
+
 export interface TurnResult {
   reply: string;
   values: BrainValues;
+  /** Αν θέλει να ψάξει κάτι: περιμένει την έγκριση του συνομιλητή. */
+  search: SearchProposal | null;
   debug: {
     note: string;
     recalled: string[];
@@ -112,6 +136,7 @@ interface Reflection {
   resolvedGoals: number[];
   impression: string;
   selfImage: string;
+  search: { source: Source; query: string } | null;
 }
 
 function parseReflection(raw: unknown): Reflection {
@@ -133,6 +158,10 @@ function parseReflection(raw: unknown): Reflection {
     resolvedGoals: (Array.isArray(r.resolved_goals) ? r.resolved_goals : []).map(Number).filter(Number.isInteger),
     impression: typeof r.impression === "string" ? r.impression.trim().slice(0, 600) : "",
     selfImage: typeof r.self_image === "string" ? r.self_image.trim().slice(0, 800) : "",
+    search:
+      isRecord(r.search) && typeof r.search.query === "string" && r.search.query.trim()
+        ? { source: r.search.source === "news" ? "news" : "wikipedia", query: r.search.query.trim().slice(0, 120) }
+        : null,
   };
 }
 
@@ -233,7 +262,7 @@ export async function processTurn(
     .then(parseReflection)
     .catch((err): Reflection => {
       console.error("[brAIn] ο αναστοχασμός απέτυχε:", err);
-      return { expressed: {}, acts: [], memories: [], resolvedGoals: [], impression: "", selfImage: "" };
+      return { expressed: {}, acts: [], memories: [], resolvedGoals: [], impression: "", selfImage: "", search: null };
     });
 
   // 6. Εγγραφή στη μνήμη — μόνο όσων ξεπερνούν το κατώφλι, με βάρος τη φόρτιση της στιγμής.
@@ -278,6 +307,16 @@ export async function processTurn(
   const impression = reflection.impression || state.impression;
   const selfImage = reflection.selfImage || state.selfImage;
 
+  // 8. Θέλει να ψάξει κάτι; Μόνο αν έχει όρεξη, δεν ζήτησε πρόσφατα, και δεν ξεπέρασε το ημερήσιο όριο.
+  let search: SearchProposal | null = null;
+  if (reflection.search && values.u_explore >= SEARCH_MIN_URGE) {
+    const last = await repo.latestSearch(db, user.id);
+    const recently = last && (last.status === "pending" || minutesBetween(last.createdAt, now) < SEARCH_COOLDOWN_MIN);
+    if (!recently && (await repo.countSearchesSince(db, user.id, dayAgo(now))) < DAILY_SEARCH_LIMIT) {
+      search = toProposal(await repo.createSearch(db, user.id, reflection.search.source, reflection.search.query, now));
+    }
+  }
+
   await repo.addMessage(db, user.id, "user", message, { appraisal }, now);
   await repo.addMessage(db, user.id, "assistant", reply, { values, expressed: reflection.expressed }, new Date(now.getTime() + 1));
   await repo.saveBrainState(db, user.id, { values, impression, selfImage, turnCount: state.turnCount + 1, updatedAt: now }, now);
@@ -285,6 +324,7 @@ export async function processTurn(
   return {
     reply,
     values,
+    search,
     debug: {
       note: appraisal.note ?? "",
       recalled: recalled.map((r) => r.memory.content),
@@ -373,4 +413,109 @@ export async function pulse(
 
   const nextWait = initiativeWaitMin(initiativeDrive(values), unanswered + 1);
   return { message, values, nextInSec: Number.isFinite(nextWait) ? Math.ceil(nextWait * 60) + 1 : null };
+}
+
+export interface SearchResult {
+  /** Αυτό που λέει αφού διάβασε (ή αφού δεν τα κατάφερε)· null αν ο συνομιλητής αρνήθηκε. */
+  message: string | null;
+  values: BrainValues;
+  stored: string[];
+}
+
+const SEARCH_FAILED = "Έψαξα, αλλά δεν κατάφερα να βρω κάτι αυτή τη στιγμή. Ίσως αργότερα.";
+
+/**
+ * Ο συνομιλητής απάντησε στην πρόταση αναζήτησης. Αν αρνήθηκε, μένει μια μικρή ματαίωση.
+ * Αν δέχτηκε: ο server φέρνει το υλικό, εκείνη το διαβάζει, λέει τι της έκανε εντύπωση,
+ * και ό,τι έμαθε γίνεται ανάμνηση — γνώση που το βασικό μοντέλο δεν είχε.
+ */
+export async function resolveSearch(
+  deps: { db: Db; llm: LlmProvider; now?: Date; lookup?: Lookup },
+  user: { id: string; name: string },
+  searchId: string,
+  approve: boolean,
+): Promise<SearchResult | null> {
+  const { db, llm } = deps;
+  const now = deps.now ?? new Date();
+
+  const search = await repo.closeSearch(db, user.id, searchId, approve ? "done" : "declined");
+  if (!search) return null;
+
+  const [state, stored] = await Promise.all([
+    repo.loadBrainState(db, user.id),
+    repo.recentMessages(db, user.id, WORKING_MEMORY),
+  ]);
+  const time = senseTime(stored, now);
+  let values = applyTime(state.values, state.updatedAt ? minutesBetween(state.updatedAt, now) : 1, time.silenceMin);
+  const save = () => repo.saveBrainState(db, user.id, { ...state, values, updatedAt: now }, now);
+
+  if (!approve) {
+    values = { ...values, frustration: clamp(values.frustration + 4) };
+    await save();
+    return { message: null, values, stored: [] };
+  }
+
+  const fail = async (): Promise<SearchResult> => {
+    await repo.setSearchStatus(db, search.id, "failed");
+    await repo.addMessage(db, user.id, "assistant", SEARCH_FAILED, { search: { ...search, failed: true } }, now);
+    await save();
+    return { message: SEARCH_FAILED, values, stored: [] };
+  };
+
+  let material;
+  try {
+    material = await (deps.lookup ?? defaultLookup)(search.source, search.query);
+  } catch (err) {
+    console.error("[brAIn] η αναζήτηση απέτυχε:", err);
+    return fail();
+  }
+  if (!material.text) return fail();
+
+  const memories = await repo.listMemories(db, user.id);
+  const { goals, rest } = splitGoals(memories, now);
+  const raw = await llm
+    .generateJson({
+      system:
+        respondSystem({
+          values,
+          impression: state.impression,
+          selfImage: state.selfImage,
+          goals: goals.map((g) => g.content),
+          recalled: recall(rest, [], valence(values), now, 3),
+          userName: user.name,
+          now,
+          time,
+        }) + readingBlock(SOURCE_LABELS[search.source], search.query),
+      prompt: materialPrompt(material.text),
+    })
+    .catch((err) => {
+      console.error("[brAIn] η ανάγνωση απέτυχε:", err);
+      return null;
+    });
+  const message = isRecord(raw) && typeof raw.message === "string" ? raw.message.trim() : "";
+  if (!message) return fail();
+
+  const learned = parseReflection({ memories: isRecord(raw) ? raw.memories : [] }).memories.slice(0, 3);
+  const storedNow: string[] = [];
+  for (const m of learned) {
+    const importance = encodeImportance(m.importance, arousal(values));
+    if (importance < MIN_IMPORTANCE) continue;
+    const embedding = await llm.embed(m.content).catch(() => [] as number[]);
+    await repo.insertMemory(db, user.id, { ...m, kind: "knowledge", importance, embedding }, now);
+    storedNow.push(m.content);
+  }
+
+  // Έμαθε: η δίψα χορταίνει, και του το χρωστά που την άφησε.
+  values = applyActs(applyExpression(values, {}, storedNow.length), ["u_explore"]);
+  values = { ...values, gratitude: clamp(values.gratitude + 5) };
+  await repo.addMessage(
+    db,
+    user.id,
+    "assistant",
+    message,
+    { values, search: { source: search.source, query: search.query, titles: material.titles } },
+    now,
+  );
+  await save();
+  return { message, values, stored: storedNow };
 }

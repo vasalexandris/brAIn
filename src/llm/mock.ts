@@ -33,6 +33,13 @@ export class MockProvider implements LlmProvider {
   }
 
   async generateJson(req: { system: string; prompt: string }): Promise<unknown> {
+    if (req.prompt.includes("<υλικό>")) {
+      const title = /## (.+)/.exec(req.prompt)?.[1] ?? "κάτι";
+      return {
+        message: `Διάβασα για «${title}». Δεν το ήξερα έτσι.`,
+        memories: [{ content: `Έμαθα για: ${title}.`, importance: 50, valence: 30 }],
+      };
+    }
     if (req.prompt.includes("<απάντηση>")) return this.reflect(req.prompt);
     return this.perceive(req.prompt);
   }
@@ -79,7 +86,9 @@ export class MockProvider implements LlmProvider {
       memories.push({ kind: "goal", content: `Θέλω να μάθω γιατί αγαπά ${loves[1]}.`, importance: 60, valence: 30 });
     }
     const explained = strip(user).includes("επειδη") && prompt.includes("1. Θέλω να μάθω");
+    const asks = /τι είναι (?:η |ο |το |οι |τα )?([^;?.!]+)/i.exec(user);
     return {
+      search: asks ? { source: "wikipedia", query: asks[1].trim() } : null,
       resolved_goals: explained ? [1] : [],
       self_image: explained ? "Μου αρέσει να καταλαβαίνω γιατί οι άνθρωποι αγαπούν αυτά που αγαπούν." : "",
       expressed: { anger: has(reply, ["σταματα", "δεν μου αρεσει"]) ? 80 : 0 },
