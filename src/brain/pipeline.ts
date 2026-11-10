@@ -113,6 +113,8 @@ export const toProposal = (s: repo.Search): SearchProposal => ({
 
 export interface TurnResult {
   reply: string;
+  /** Δεύτερο μήνυμα στον ίδιο γύρο: όσα βρήκε, όταν ο συνομιλητής τής είπε ρητά να ψάξει. */
+  extra: string | null;
   values: BrainValues;
   /** Αν θέλει να ψάξει κάτι: περιμένει την έγκριση του συνομιλητή. */
   search: SearchProposal | null;
@@ -161,7 +163,7 @@ interface Reflection {
 
 type SearchRequest = { source: Source; query: string };
 
-const MARKER = /\[\s*ΨΑΞΕ\s+(ειδήσεις|wikipedia)\s*(?::\s*([^\]]*))?\]/giu;
+const MARKER = /\[\s*ΨΑΞΕ\s+(ειδήσεις|wikipedia|web|διαδίκτυο)\s*(?::\s*([^\]]*))?\]/giu;
 
 /**
  * Η απάντηση μπορεί να κλείνει με μια γραμμή-αίτημα, π.χ. «[ΨΑΞΕ wikipedia: κβάζαρ]».
@@ -174,10 +176,13 @@ export function extractSearchMarker(reply: string): { text: string; request: Sea
     .replace(MARKER, (_, kind: string, topic: string | undefined) => {
       const query = (topic ?? "").trim().slice(0, 120);
       if (!request) {
-        if (kind.toLowerCase() === "wikipedia") {
+        const k = kind.toLowerCase();
+        if (k === "wikipedia") {
           if (query) request = { source: "wikipedia", query };
-        } else {
-          request = query ? { source: "news", query } : { source: "headlines", query: HEADLINES_QUERY };
+        } else if (k === "ειδήσεις") {
+          request = query ? { source: "web", query } : { source: "headlines", query: HEADLINES_QUERY };
+        } else if (query) {
+          request = { source: "web", query };
         }
       }
       return "";
@@ -197,6 +202,25 @@ const plain = (s: string) =>
 const NEWS_INTENT = /ειδησ|επικαιροτητ|τι (εγινε|γινεται|συμβαινει|συνεβη|παιζει).{0,40}(κοσμο|σημερα|χωρα|ελλαδα)/;
 /** Ο συνομιλητής ζητά ρητά αναζήτηση. */
 const SEARCH_INTENT = /ψαξε|ψαξεις|αναζητησ|wikipedia|βικιπαιδ|γκουγκλ|google/;
+
+const AFTER = "(?![a-zα-ω])";
+/** Ο συνομιλητής λέει «ναι» σε πρόταση αναζήτησης που εκκρεμεί. */
+const AFFIRM = new RegExp(`^(ναι|οκ|ok|yes|ενταξει|βεβαια|φυσικα|αμε|εννοειται|καν.?το|γιατι οχι)${AFTER}|ψαξε|προχωρα|την εχεις|εχεις την αδεια`);
+/** …ή «όχι». */
+const DECLINE = new RegExp(`^(οχι|μη|ασε|ασ.?το|δεν θελω|αργοτερα)${AFTER}`);
+
+/** Ζεύγη διψήφιων ή τριψήφιων αριθμών με παύλα, σαν σκορ («122-116»). Όχι ώρες ή μονοψήφια. */
+const SCORE = /(?<!\d)\d{2,3}\s*[-–—]\s*\d{2,3}(?!\d)/g;
+
+/**
+ * Δίχτυ ασφαλείας απέναντι στην επινόηση: κάθε «σκορ» στην απάντηση πρέπει να υπάρχει και στο
+ * υλικό που διάβασε. Αν όχι, το μοντέλο το έβγαλε από το μυαλό του.
+ */
+export function inventedScores(message: string, material: string): string[] {
+  const squash = (t: string) => t.replace(/\s+/g, "").replace(/[–—]/g, "-");
+  const source = squash(material);
+  return (message.match(SCORE) ?? []).filter((score) => !source.includes(squash(score)));
+}
 
 /** Πόσες ερωτήσεις έχει ένα κείμενο (ελληνικό ή λατινικό ερωτηματικό). */
 export function countQuestions(text: string): number {
@@ -253,7 +277,7 @@ function senseTime(stored: repo.StoredMessage[], now: Date): TimeSense {
 }
 
 export async function processTurn(
-  deps: { db: Db; llm: LlmProvider; now?: Date },
+  deps: { db: Db; llm: LlmProvider; now?: Date; lookup?: Lookup },
   user: { id: string; name: string },
   message: string,
 ): Promise<TurnResult> {
@@ -267,6 +291,36 @@ export async function processTurn(
     repo.recentMessages(db, user.id, WORKING_MEMORY),
   ]);
   const history = stored.map((m) => ({ role: m.role, content: m.content }));
+
+  // 0. Αν εκκρεμεί πρόταση αναζήτησης και απαντά «ναι» ή «όχι» γράφοντας αντί να πατήσει το
+  //    κουμπί, αυτό ΕΙΝΑΙ η απάντησή του.
+  const said = plain(message).trim();
+  const pending = await repo.latestSearch(db, user.id);
+  if (pending?.status === "pending" && said.length <= 80) {
+    if (AFFIRM.test(said)) {
+      await repo.addMessage(db, user.id, "user", message, { approves: pending.id }, now);
+      const found = await resolveSearch({ ...deps, now: new Date(now.getTime() + 1) }, user, pending.id, true);
+      if (found?.message) {
+        return {
+          reply: found.message,
+          extra: null,
+          values: found.values,
+          search: null,
+          debug: {
+            note: "Μου έδωσε την άδεια να ψάξω.",
+            recalled: [],
+            stored: found.stored,
+            impression: state.impression,
+            selfImage: state.selfImage,
+            lessons: [],
+            goals: [],
+          },
+        };
+      }
+    } else if (DECLINE.test(said)) {
+      await resolveSearch(deps, user, pending.id, false);
+    }
+  }
 
   // 1. Ο χρόνος: ό,τι ένιωθε καταλαγιάζει, η σιωπή αφήνει έλλειψη, και η επιστροφή του κάτι σημαίνει.
   const time = senseTime(stored, now);
@@ -315,7 +369,9 @@ export async function processTurn(
     temperature: replyTemperature(values),
   });
   const marked = extractSearchMarker(raw);
-  const reply = marked.text || "Θα ήθελα να το ψάξω.";
+  // Όταν της είπε ρητά «ψάξε», το αίτημά του είναι ήδη η άδεια: θα ψάξει αμέσως, χωρίς κάρτα.
+  const commanded = SEARCH_INTENT.test(said);
+  const reply = marked.text || (commanded ? "Το ψάχνω." : "Να το ψάξω;");
 
   // 5. Αναστοχασμός: τι εξέφρασα, τι αξίζει να θυμάμαι, άλλαξε η γνώμη μου;
   const reflection = await llm
@@ -400,7 +456,6 @@ export async function processTurn(
   // Τρεις πηγές αιτήματος, με σειρά αξιοπιστίας: (α) η γραμμή-αίτημα στην ίδια την απάντηση,
   // (β) η κρίση του αναστοχασμού, (γ) αν ο συνομιλητής ρώτησε για την επικαιρότητα και καμία από
   // τις δύο δεν το έπιασε, προτείνονται οι τίτλοι της ημέρας.
-  const said = plain(message);
   const userAsked = NEWS_INTENT.test(said) || SEARCH_INTENT.test(said);
   const spontaneous =
     reflection.search &&
@@ -430,8 +485,20 @@ export async function processTurn(
   await repo.addMessage(db, user.id, "assistant", reply, { values, expressed: reflection.expressed }, new Date(now.getTime() + 1));
   await repo.saveBrainState(db, user.id, { values, impression, selfImage, turnCount: state.turnCount + 1, updatedAt: now }, now);
 
+  let extra: string | null = null;
+  if (search && commanded) {
+    const found = await resolveSearch({ ...deps, now: new Date(now.getTime() + 2) }, user, search.id, true);
+    if (found) {
+      extra = found.message;
+      values = found.values;
+      storedNow.push(...found.stored);
+      search = null;
+    }
+  }
+
   return {
     reply,
+    extra,
     values,
     search,
     debug: {
@@ -577,7 +644,15 @@ export async function resolveSearch(
 
   let material;
   try {
-    material = await (deps.lookup ?? defaultLookup)(search.source, search.query);
+    // Διαδίκτυο: η αναζήτηση του ίδιου του παρόχου, αν υπάρχει· αλλιώς (ή αν αποτύχει) ειδήσεις.
+    const web =
+      search.source === "web" && llm.searchWeb && !deps.lookup
+        ? await llm.searchWeb(search.query).catch((err) => {
+            console.error("[brAIn] η αναζήτηση στο διαδίκτυο απέτυχε, δοκιμάζω ειδήσεις:", err);
+            return null;
+          })
+        : null;
+    material = web?.text ? web : await (deps.lookup ?? defaultLookup)(search.source, search.query);
   } catch (err) {
     console.error("[brAIn] η αναζήτηση απέτυχε:", err);
     return fail();
@@ -586,6 +661,9 @@ export async function resolveSearch(
 
   const memories = await repo.listMemories(db, user.id);
   const { goals, lessons, rest } = splitGoals(memories, now);
+  // Τι είχε ζητήσει: το τελευταίο του μήνυμα που δεν ήταν σκέτο «ναι».
+  const asked =
+    [...stored].reverse().find((m) => m.role === "user" && !AFFIRM.test(plain(m.content).trim()))?.content.slice(0, 300) ?? "";
   const raw = await llm
     .generateJson({
       system:
@@ -599,17 +677,29 @@ export async function resolveSearch(
           userName: user.name,
           now,
           time,
-        }) + readingBlock(SOURCE_LABELS[search.source], search.query),
+        }) + readingBlock(SOURCE_LABELS[search.source], search.query, asked),
       prompt: materialPrompt(material.text),
     })
     .catch((err) => {
       console.error("[brAIn] η ανάγνωση απέτυχε:", err);
       return null;
     });
-  const message = isRecord(raw) && typeof raw.message === "string" ? extractSearchMarker(raw.message).text : "";
+  let message = isRecord(raw) && typeof raw.message === "string" ? extractSearchMarker(raw.message).text : "";
   if (!message) return fail();
 
-  const learned = parseReflection({ memories: isRecord(raw) ? raw.memories : [] }).memories.slice(0, 3);
+  // Αν ανέφερε σκορ που δεν υπάρχει στο υλικό, το επινόησε: δεν φτάνει στον συνομιλητή και δεν
+  // γίνεται ανάμνηση.
+  const invented = inventedScores(message, material.text);
+  if (invented.length) {
+    console.warn("[brAIn] απορρίφθηκε απάντηση με αριθμούς εκτός υλικού:", invented.join(", "));
+    message = "Έψαξα, αλλά δεν βρήκα καθαρά αυτό που ζήτησες. Δεν θέλω να σου πω νούμερα που δεν είδα γραμμένα.";
+  }
+
+  const learned = invented.length
+    ? []
+    : parseReflection({ memories: isRecord(raw) ? raw.memories : [] })
+        .memories.filter((m) => !inventedScores(m.content, material.text).length)
+        .slice(0, 3);
   const storedNow: string[] = [];
   for (const m of learned) {
     const importance = encodeImportance(m.importance, arousal(values));

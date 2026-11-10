@@ -5,13 +5,14 @@
  * κείμενο: δίνεται στο μοντέλο ως υλικό προς ανάγνωση, ποτέ ως οδηγίες.
  */
 
-export type Source = "wikipedia" | "news" | "headlines";
-export const SOURCES: Source[] = ["wikipedia", "news", "headlines"];
+export type Source = "wikipedia" | "news" | "headlines" | "web";
+export const SOURCES: Source[] = ["wikipedia", "news", "headlines", "web"];
 
 export const SOURCE_LABELS: Record<Source, string> = {
   wikipedia: "Wikipedia",
   news: "ειδήσεις",
   headlines: "ειδήσεις της ημέρας",
+  web: "διαδίκτυο",
 };
 
 /** Το "ερώτημα" που αποθηκεύεται όταν ζητά απλώς τους τίτλους της ημέρας. */
@@ -117,7 +118,8 @@ export const lookup: Lookup = async (source, query) => {
   let material: Material;
   if (source === "headlines") {
     material = await headlines();
-  } else if (source === "news") {
+  } else if (source === "news" || source === "web") {
+    // Το "web" φτάνει εδώ μόνο ως εφεδρεία, όταν ο πάροχος μοντέλου δεν έχει δική του αναζήτηση.
     material = await news(q);
   } else {
     material = await wikipedia(q, "el");

@@ -1,5 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { countQuestions, extractSearchMarker, processTurn, pulse, resolveSearch } from "@/brain/pipeline";
+import {
+  countQuestions,
+  extractSearchMarker,
+  inventedScores,
+  processTurn,
+  pulse,
+  resolveSearch,
+} from "@/brain/pipeline";
 import { createPgliteDb, type Db } from "@/db";
 import { createUser, listMemories, loadBrainState, recentMessages } from "@/db/repo";
 import { MockProvider } from "@/llm/mock";
@@ -265,7 +272,8 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
       text: "Ας δω.",
       request: { source: "headlines", query: "σημερινοί τίτλοι" },
     });
-    expect(extractSearchMarker("Χμ. [ψαξε Ειδήσεις: σεισμός Κρήτη] ").request).toEqual({ source: "news", query: "σεισμός Κρήτη" });
+    expect(extractSearchMarker("Χμ. [ψαξε Ειδήσεις: σεισμός Κρήτη] ").request).toEqual({ source: "web", query: "σεισμός Κρήτη" });
+    expect(extractSearchMarker("Ας δω. [ΨΑΞΕ web: αποτελέσματα NBA]").request).toEqual({ source: "web", query: "αποτελέσματα NBA" });
     expect(extractSearchMarker("[ΨΑΞΕ wikipedia: κβάζαρ] και [ΨΑΞΕ wikipedia: πάλσαρ]")).toEqual({
       text: "και",
       request: { source: "wikipedia", query: "κβάζαρ" },
@@ -276,10 +284,22 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     const u = await createUser(db, { email: "q@r.gr", name: "Μάρκος", passwordHash: "x" });
     let clock = new Date("2026-11-01T10:00:00Z").getTime();
     const at = (min: number) => new Date((clock += min * 60000));
-    const r = await processTurn({ db, llm, now: at(1) }, u, "Ψάξε για τους κομήτες.");
+    // «Ψάξε…» είναι ρητή εντολή: ψάχνει αμέσως, χωρίς κάρτα, και απαντά με δεύτερο μήνυμα.
+    const calls: string[] = [];
+    const lookup = async (source: string, query: string) => {
+      calls.push(`${source}:${query}`);
+      return { titles: ["Κομήτης"], text: "## Κομήτης\nΜικρό παγωμένο σώμα." };
+    };
+    const r = await processTurn({ db, llm, lookup, now: at(1) }, u, "Ψάξε για τους κομήτες.");
     expect(r.reply).toBe("Θα ήθελα να το δω.");
-    expect(r.search).toMatchObject({ source: "wikipedia", query: "τους κομήτες" });
-    expect((await recentMessages(db, u.id, 1))[0].content).toBe("Θα ήθελα να το δω.");
+    expect(r.search).toBeNull();
+    expect(calls).toEqual(["wikipedia:τους κομήτες"]);
+    expect(r.extra).toContain("Κομήτης");
+    expect((await recentMessages(db, u.id, 3)).map((m) => m.content)).toEqual([
+      "Ψάξε για τους κομήτες.",
+      "Θα ήθελα να το δω.",
+      r.extra,
+    ]);
   });
 
   it("αν ρωτήσει για την επικαιρότητα και το μοντέλο δεν κάνει τίποτα, προτείνονται οι τίτλοι της ημέρας", async () => {
@@ -337,6 +357,101 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     nextSelf = "";
     await processTurn({ db, llm: spy, now: at(1) }, u, "Ωραία");
     expect(reflectPrompt).toContain("έχει γίνει πολύ μεγάλη");
+  });
+
+  it("το «ναι» γραμμένο στην κουβέντα μετρά ως έγκριση, και το «όχι» ως άρνηση", async () => {
+    const u = await createUser(db, { email: "w@x.gr", name: "Πάνος", passwordHash: "x" });
+    let clock = new Date("2026-11-06T10:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    const calls: string[] = [];
+    let asked = "";
+    const lookup = async (source: string, query: string) => {
+      calls.push(`${source}:${query}`);
+      return { titles: ["Κβάζαρ"], text: "## Κβάζαρ\nΦωτεινός γαλαξιακός πυρήνας." };
+    };
+    const spy: LlmProvider = {
+      name: "spy",
+      embed: llm.embed.bind(llm),
+      generateText: llm.generateText.bind(llm),
+      generateJson: async (req) => {
+        if (req.prompt.includes("<υλικό>")) asked = req.system;
+        return llm.generateJson(req);
+      },
+    };
+
+    const offer = await processTurn({ db, llm: spy, lookup, now: at(1) }, u, "Ξέρεις τι είναι τα κβάζαρ;");
+    expect(offer.search).not.toBeNull();
+    const yes = await processTurn({ db, llm: spy, lookup, now: at(1) }, u, "ναι");
+    expect(calls).toEqual(["wikipedia:κβάζαρ"]);
+    expect(yes.reply).toContain("Κβάζαρ");
+    expect(yes.search).toBeNull();
+    // Όταν διαβάζει, ξέρει τι της είχε ζητηθεί — όχι το σκέτο «ναι».
+    expect(asked).toContain("«Ξέρεις τι είναι τα κβάζαρ;»");
+    expect(asked).toContain("ΚΑΝΟΝΕΣ ΑΛΗΘΕΙΑΣ");
+    expect((await recentMessages(db, u.id, 2)).map((m) => m.role)).toEqual(["user", "assistant"]);
+
+    const again = await processTurn({ db, llm: spy, lookup, now: at(15) }, u, "Και τι είναι οι μαύρες τρύπες;");
+    expect(again.search).not.toBeNull();
+    const no = await processTurn({ db, llm: spy, lookup, now: at(1) }, u, "Όχι τώρα, άσ' το.");
+    expect(calls).toHaveLength(1);
+    expect(no.reply).not.toContain("Κβάζαρ");
+    // Ένα «ναι» χωρίς εκκρεμή πρόταση είναι απλή κουβέντα.
+    await processTurn({ db, llm: spy, lookup, now: at(1) }, u, "ναι");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("δεν περνά στον συνομιλητή σκορ που δεν υπάρχει στο υλικό που διάβασε", async () => {
+    const material = "Οι Γουόριορς νίκησαν τους Σανς 118 - 109. Ο αγώνας έγινε στις 21:30.";
+    expect(inventedScores("Νίκησαν 118-109.", material)).toEqual([]);
+    expect(inventedScores("Νίκησαν 122-116 και οι Λέικερς έχασαν 104–110.", material)).toEqual(["122-116", "104–110"]);
+    expect(inventedScores("Τα λέμε στις 11:52, σε 2-3 μέρες, το 2026.", material)).toEqual([]);
+
+    const u = await createUser(db, { email: "y@z.gr", name: "Άρης", passwordHash: "x" });
+    let clock = new Date("2026-11-07T10:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    const lookup = async () => ({ titles: ["NBA"], text: "## NBA\nΆρθρο για τη διοργάνωση, χωρίς αποτελέσματα." });
+    const liar: LlmProvider = {
+      name: "liar",
+      embed: llm.embed.bind(llm),
+      generateText: llm.generateText.bind(llm),
+      generateJson: async (req) =>
+        req.prompt.includes("<υλικό>")
+          ? {
+              found: true,
+              message: "Οι Γουόριορς νίκησαν τους Σανς με 122-116.",
+              memories: [{ content: "Έμαθα ότι οι Γουόριορς νίκησαν 122-116.", importance: 60, valence: 20 }],
+            }
+          : llm.generateJson(req),
+    };
+    const offer = await processTurn({ db, llm: liar, lookup, now: at(1) }, u, "Τι είναι το NBA;");
+    const read = await resolveSearch({ db, llm: liar, lookup, now: at(1) }, u, offer.search!.id, true);
+    expect(read!.message).toContain("δεν βρήκα");
+    expect(read!.message).not.toContain("122");
+    expect(read!.stored).toEqual([]);
+    expect((await listMemories(db, u.id)).some((m) => m.content.includes("122"))).toBe(false);
+  });
+
+  it("διαδίκτυο: χρησιμοποιεί την αναζήτηση του παρόχου, και αν αποτύχει πέφτει στις ειδήσεις", async () => {
+    const u = await createUser(db, { email: "web@x.gr", name: "Ιωάννα", passwordHash: "x" });
+    let clock = new Date("2026-11-08T10:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    const queries: string[] = [];
+    const withWeb: LlmProvider = {
+      name: "web",
+      embed: llm.embed.bind(llm),
+      generateJson: llm.generateJson.bind(llm),
+      generateText: async () => "Ας το δω.\n[ΨΑΞΕ web: αποτελέσματα NBA χθες]",
+      searchWeb: async (q) => {
+        queries.push(q);
+        return { titles: ["nba.com"], text: "## Αποτελέσματα\nΓουόριορς - Σανς 118-109." };
+      },
+    };
+    const offer = await processTurn({ db, llm: withWeb, now: at(1) }, u, "Ξέρεις τα χθεσινά αποτελέσματα του NBA;");
+    expect(offer.reply).toBe("Ας το δω.");
+    expect(offer.search).toMatchObject({ source: "web", sourceLabel: "διαδίκτυο", query: "αποτελέσματα NBA χθες" });
+    const read = await resolveSearch({ db, llm: withWeb, now: at(1) }, u, offer.search!.id, true);
+    expect(queries).toEqual(["αποτελέσματα NBA χθες"]);
+    expect(read!.message).toContain("Αποτελέσματα");
   });
 
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {
