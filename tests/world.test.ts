@@ -30,6 +30,17 @@ describe("παράθυρο στον κόσμο", () => {
     expect(m.text).toContain("ert.gr");
   });
 
+  it("τίτλοι ημέρας: από τη ροή της ΕΡΤ, χωρίς ερώτημα", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      urls.push(url);
+      return new Response(RSS);
+    });
+    const m = await lookup("headlines", "οτιδήποτε");
+    expect(urls).toEqual(["https://www.ertnews.gr/feed/"]);
+    expect(m.titles[0]).toBe("Σεισμός 4,2 & μετασεισμοί");
+  });
+
   it("Wikipedia: πρώτα ελληνικά, αλλιώς αγγλικά, με σειρά συνάφειας και όριο μήκους", async () => {
     const hosts: string[] = [];
     vi.stubGlobal("fetch", async (url: string) => {

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { countQuestions, processTurn, pulse, resolveSearch } from "@/brain/pipeline";
+import { countQuestions, extractSearchMarker, processTurn, pulse, resolveSearch } from "@/brain/pipeline";
 import { createPgliteDb, type Db } from "@/db";
 import { createUser, listMemories, loadBrainState, recentMessages } from "@/db/repo";
 import { MockProvider } from "@/llm/mock";
@@ -258,6 +258,54 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     expect(asked.search).toMatchObject({ source: "news", sourceLabel: "ειδήσεις" });
     // Το ημερήσιο όριο και η μία εκκρεμότητα εξακολουθούν να ισχύουν.
     expect((await processTurn({ db, llm, now: at(1) }, u, "Δες τις ειδήσεις!")).search).toBeNull();
+  });
+
+  it("η γραμμή-αίτημα στην απάντηση γίνεται κάρτα και δεν φτάνει ποτέ στον συνομιλητή", async () => {
+    expect(extractSearchMarker("Ας δω.\n[ΨΑΞΕ ειδήσεις]")).toEqual({
+      text: "Ας δω.",
+      request: { source: "headlines", query: "σημερινοί τίτλοι" },
+    });
+    expect(extractSearchMarker("Χμ. [ψαξε Ειδήσεις: σεισμός Κρήτη] ").request).toEqual({ source: "news", query: "σεισμός Κρήτη" });
+    expect(extractSearchMarker("[ΨΑΞΕ wikipedia: κβάζαρ] και [ΨΑΞΕ wikipedia: πάλσαρ]")).toEqual({
+      text: "και",
+      request: { source: "wikipedia", query: "κβάζαρ" },
+    });
+    expect(extractSearchMarker("[ΨΑΞΕ wikipedia]").request).toBeNull();
+    expect(extractSearchMarker("Τίποτα ιδιαίτερο [βλέπε παρακάτω].")).toEqual({ text: "Τίποτα ιδιαίτερο [βλέπε παρακάτω].", request: null });
+
+    const u = await createUser(db, { email: "q@r.gr", name: "Μάρκος", passwordHash: "x" });
+    let clock = new Date("2026-11-01T10:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    const r = await processTurn({ db, llm, now: at(1) }, u, "Ψάξε για τους κομήτες.");
+    expect(r.reply).toBe("Θα ήθελα να το δω.");
+    expect(r.search).toMatchObject({ source: "wikipedia", query: "τους κομήτες" });
+    expect((await recentMessages(db, u.id, 1))[0].content).toBe("Θα ήθελα να το δω.");
+  });
+
+  it("αν ρωτήσει για την επικαιρότητα και το μοντέλο δεν κάνει τίποτα, προτείνονται οι τίτλοι της ημέρας", async () => {
+    const u = await createUser(db, { email: "s@t.gr", name: "Νίκη", passwordHash: "x" });
+    let clock = new Date("2026-11-02T10:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    // Ένα μοντέλο που αγνοεί εντελώς τη δυνατότητα αναζήτησης, όπως έγινε στην πράξη.
+    const oblivious: LlmProvider = {
+      name: "oblivious",
+      embed: llm.embed.bind(llm),
+      generateJson: async () => ({ perception: {}, impulses: {}, search: null }),
+      generateText: async () => "Αν θες να μου πεις τι έγινε, μπορώ να μάθω.",
+    };
+    const calls: string[] = [];
+    const lookup = async (source: string, query: string) => {
+      calls.push(`${source}:${query}`);
+      return { titles: ["Τίτλος"], text: "## Τίτλος\nΚείμενο." };
+    };
+
+    expect((await processTurn({ db, llm: oblivious, now: at(1) }, u, "Καλημέρα, τι κάνεις;")).search).toBeNull();
+    const asked = await processTurn({ db, llm: oblivious, now: at(1) }, u, "πάντως δεν έμαθες τι έγινε στον κόσμο σήμερα");
+    expect(asked.search).toMatchObject({ source: "headlines", sourceLabel: "ειδήσεις της ημέρας" });
+    await resolveSearch({ db, llm, lookup, now: at(1) }, u, asked.search!.id, true);
+    expect(calls).toEqual(["headlines:σημερινοί τίτλοι"]);
+    // Αμέσως μετά, αν ξαναρωτήσει, εμφανίζεται πάλι: το ζητά ο ίδιος.
+    expect((await processTurn({ db, llm: oblivious, now: at(1) }, u, "Διάβασε και τις ειδήσεις ξανά")).search).not.toBeNull();
   });
 
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {
