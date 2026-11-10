@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS searches (
 );
 CREATE INDEX IF NOT EXISTS searches_user_time ON searches (user_id, created_at);
 
+-- Το κείμενο που βρέθηκε: μένει διαθέσιμο για λίγο, ώστε οι επόμενες ερωτήσεις να απαντώνται
+-- από αυτό και όχι από τη φαντασία του μοντέλου.
+ALTER TABLE searches ADD COLUMN IF NOT EXISTS material text;
+
 -- Μακρόχρονη μνήμη: μόνο ό,τι άξιζε να κρατηθεί.
 CREATE TABLE IF NOT EXISTS memories (
   id               text PRIMARY KEY,

@@ -405,6 +405,7 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     expect(inventedScores("Νίκησαν 118-109.", material)).toEqual([]);
     expect(inventedScores("Νίκησαν 122-116 και οι Λέικερς έχασαν 104–110.", material)).toEqual(["122-116", "104–110"]);
     expect(inventedScores("Τα λέμε στις 11:52, σε 2-3 μέρες, το 2026.", material)).toEqual([]);
+    expect(inventedScores("Θα πάρει 10-15 λεπτά, ίσως 20-30. Πριν από 50-60 χρόνια.", material)).toEqual([]);
 
     const u = await createUser(db, { email: "y@z.gr", name: "Άρης", passwordHash: "x" });
     let clock = new Date("2026-11-07T10:00:00Z").getTime();
@@ -521,6 +522,53 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     expect(no.search).toBeNull();
     expect(no.extra).toBeNull();
     expect(calls).toHaveLength(before);
+  });
+
+  it("ό,τι διάβασε μένει μπροστά της για τις επόμενες ερωτήσεις, και δεν περνά σκορ που δεν έχει δει", async () => {
+    const u = await createUser(db, { email: "mat@x.gr", name: "Βασίλης", passwordHash: "x" });
+    let clock = new Date("2026-11-10T20:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    const lookup = async () => ({ titles: ["NBA"], text: "## 9 Νοεμβρίου\nΛέικερς - Χοκς 124-114\nΠέλικανς - Ουόριορς 87-138" });
+    let text = "Γεια.";
+    let system = "";
+    const model: LlmProvider = {
+      name: "model",
+      embed: llm.embed.bind(llm),
+      generateText: async (req) => {
+        system = req.system;
+        return text;
+      },
+      generateJson: async (req) =>
+        req.prompt.includes("<υλικό>") ? { message: "Βρήκα τα αποτελέσματα της 9ης Νοεμβρίου.", memories: [] } : { perception: {}, impulses: {} },
+    };
+
+    text = "Ας δω.";
+    const first = await processTurn({ db, llm: model, lookup, now: at(1) }, u, "Ψάξε τα χθεσινά αποτελέσματα του NBA");
+    expect(first.extra).toContain("9ης Νοεμβρίου");
+
+    // Σκορ που υπάρχουν στο υλικό περνούν· το υλικό είναι μέσα στο prompt.
+    text = "Λέικερς - Χοκς 124-114 και Πέλικανς - Ουόριορς 87-138.";
+    const fromMaterial = await processTurn({ db, llm: model, lookup, now: at(2) }, u, "δεν μπορείς να μου δώσεις σκορ;");
+    expect(system).toContain("ΤΙ ΔΙΑΒΑΣΕΣ ΠΡΟΣΦΑΤΑ");
+    expect(system).toContain("Πέλικανς - Ουόριορς 87-138");
+    expect(fromMaterial.reply).toContain("124-114");
+
+    // Σκορ για μέρα που δεν υπάρχει στο υλικό: δεν φτάνουν στον συνομιλητή, και προσφέρεται να ψάξει.
+    text = "10 Νοεμβρίου: Λέικερς - Κινγκς 128-115, Σανς - Νάγκετς 110-109.";
+    const invented = await processTurn({ db, llm: model, lookup, now: at(2) }, u, "και της 10ης;");
+    expect(invented.reply).not.toContain("128");
+    expect(invented.reply).toContain("Δεν έχω μπροστά μου");
+    expect(invented.search).toMatchObject({ source: "web" });
+    await resolveSearch({ db, llm: model, lookup, now: at(1) }, u, invented.search!.id, false);
+
+    // Ένα σκορ που ανέφερε ο ίδιος ο συνομιλητής μπορεί φυσικά να το επαναλάβει.
+    text = "Α, 101-99 λες. Κοντινό ματς.";
+    expect((await processTurn({ db, llm: model, lookup, now: at(1) }, u, "Ο Ολυμπιακός κέρδισε 101-99!")).reply).toContain("101-99");
+
+    // Μετά από μία ώρα το υλικό δεν είναι πια μπροστά της.
+    text = "Καλά είμαι.";
+    await processTurn({ db, llm: model, lookup, now: at(60) }, u, "Τι κάνεις τώρα που πέρασε η ώρα");
+    expect(system).not.toContain("ΤΙ ΔΙΑΒΑΣΕΣ ΠΡΟΣΦΑΤΑ");
   });
 
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {

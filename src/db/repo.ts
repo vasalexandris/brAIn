@@ -238,3 +238,18 @@ export async function countSearchesSince(db: Db, userId: string, since: Date): P
   );
   return rows[0].n;
 }
+
+export async function saveSearchMaterial(db: Db, id: string, material: string): Promise<void> {
+  await db.query(`UPDATE searches SET material = $2 WHERE id = $1`, [id, material]);
+}
+
+/** Ό,τι διάβασε πρόσφατα: το υλικό των αναζητήσεων που ολοκληρώθηκαν από το `since` και μετά. */
+export async function recentMaterial(db: Db, userId: string, since: Date): Promise<{ query: string; text: string; at: Date }[]> {
+  const rows = await db.query(
+    `SELECT query, material, created_at FROM searches
+      WHERE user_id = $1 AND status = 'done' AND material IS NOT NULL AND created_at >= $2
+      ORDER BY created_at DESC LIMIT 2`,
+    [userId, since.toISOString()],
+  );
+  return rows.map((r) => ({ query: r.query, text: r.material, at: new Date(r.created_at) }));
+}

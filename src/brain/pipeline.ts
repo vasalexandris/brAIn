@@ -63,6 +63,8 @@ export const DAILY_SEARCH_LIMIT = 20;
 const SEARCH_COOLDOWN_MIN = 10;
 /** Κάτω από τόση όρεξη «να εμβαθύνω» δεν ζητά να ψάξει. */
 const SEARCH_MIN_URGE = 40;
+/** Για τόσα λεπτά μετά από μια αναζήτηση, το υλικό της μένει μπροστά της. */
+const MATERIAL_KEEP_MIN = 45;
 const dayAgo = (now: Date) => new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
 export class DailyLimitError extends Error {}
@@ -223,7 +225,11 @@ const SCORE = /(?<!\d)\d{2,3}\s*[-–—]\s*\d{2,3}(?!\d)/g;
 export function inventedScores(message: string, material: string): string[] {
   const squash = (t: string) => t.replace(/\s+/g, "").replace(/[–—]/g, "-");
   const source = squash(material);
-  return (message.match(SCORE) ?? []).filter((score) => !source.includes(squash(score)));
+  return (message.match(SCORE) ?? []).filter((score) => {
+    // Μόνο ό,τι μοιάζει με σκορ μπάσκετ: «10-15 λεπτά» ή «20-30 χρόνια» είναι απλή κουβέντα.
+    const [a, b] = squash(score).split("-").map(Number);
+    return a >= 60 && b >= 60 && !source.includes(squash(score));
+  });
 }
 
 /** Πόσες ερωτήσεις έχει ένα κείμενο (ελληνικό ή λατινικό ερωτηματικό). */
@@ -354,6 +360,7 @@ export async function processTurn(
   const memories = await repo.listMemories(db, user.id);
   const { goals, lessons, rest } = splitGoals(memories, now);
   const goalTexts = goals.map((g) => g.content);
+  const material = await repo.recentMaterial(db, user.id, new Date(now.getTime() - MATERIAL_KEEP_MIN * 60000));
   const recalled = recall(rest, cue, valence(values), now);
 
   // 4. Απόκριση. Αν αποτύχει, ο γύρος ακυρώνεται και δεν αποθηκεύεται τίποτα.
@@ -368,11 +375,23 @@ export async function processTurn(
       userName: user.name,
       now,
       time,
+      material,
     }),
     messages: [...history, { role: "user", content: message }],
     temperature: replyTemperature(values),
   });
-  const marked = extractSearchMarker(raw);
+  let marked = extractSearchMarker(raw);
+  // Κάθε σκορ που αναφέρει πρέπει να υπάρχει κάπου που το είδε: στο υλικό που διάβασε πρόσφατα ή
+  // στην ίδια την κουβέντα. Αλλιώς το επινόησε, και η απάντηση δεν φτάνει στον συνομιλητή.
+  const seen = [message, ...history.map((m) => m.content), ...material.map((m) => m.text)].join("\n");
+  const madeUp = inventedScores(marked.text, seen);
+  if (madeUp.length) {
+    console.warn("[brAIn] απορρίφθηκε απάντηση με αριθμούς που δεν έχει δει:", madeUp.join(", "));
+    marked = {
+      text: "Δεν έχω μπροστά μου αυτά τα νούμερα, και δεν θέλω να σου πω κάτι που δεν είδα γραμμένο. Να τα ψάξω;",
+      request: marked.request ?? { source: "web", query: message.trim().slice(0, 120) },
+    };
+  }
   // Όταν της είπε ρητά να ψάξει — ή απάντησε «ναι» στη δική της προσφορά να ψάξει — το αίτημά του
   // είναι ήδη η άδεια: θα ψάξει αμέσως, χωρίς κάρτα.
   const lastOwn = [...stored].reverse().find((m) => m.role === "assistant");
@@ -426,6 +445,8 @@ export async function processTurn(
     limit: "Έχω ψάξει αρκετά για σήμερα. Ας το δούμε αύριο.",
     declined: "Εντάξει, το αφήνω για τώρα.",
   };
+  // Αν προσφέρθηκε να ψάξει αλλά η κάρτα δεν μπορεί να υπάρξει, δεν μένει ερώτηση στον αέρα.
+  if (madeUp.length && outcome !== "created") marked.text = marked.text.replace(/ Να τα ψάξω;$/, "");
   const reply = marked.text || (outcome ? FALLBACK[outcome] : "Τι ακριβώς θέλεις να ψάξω;");
 
   // 5. Αναστοχασμός: τι εξέφρασα, τι αξίζει να θυμάμαι, άλλαξε η γνώμη μου;
@@ -694,6 +715,7 @@ export async function resolveSearch(
     return fail();
   }
   if (!material.text) return fail();
+  await repo.saveSearchMaterial(db, search.id, material.text.slice(0, 6000));
 
   const memories = await repo.listMemories(db, user.id);
   const { goals, lessons, rest } = splitGoals(memories, now);
