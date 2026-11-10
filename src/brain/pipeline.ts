@@ -42,6 +42,16 @@ import {
   type BrainValues,
 } from "./state";
 
+/**
+ * Όρια κόστους ανά χρήστη και εικοσιτετράωρο. Κάθε μήνυμα σημαίνει κλήσεις σε μοντέλο που
+ * χρεώνονται· τα όρια αυτά ισχύουν ό,τι κι αν λένε οι δείκτες.
+ */
+export const DAILY_MESSAGE_LIMIT = Number(process.env.DAILY_MESSAGE_LIMIT) || 200;
+const DAILY_INITIATIVE_LIMIT = 6;
+const dayAgo = (now: Date) => new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+export class DailyLimitError extends Error {}
+
 /** Πόσα πρόσφατα μηνύματα μένουν στην "άμεση" μνήμη εργασίας. */
 const WORKING_MEMORY = 16;
 const MEMORY_KINDS: MemoryKind[] = ["user_fact", "episode", "knowledge", "opinion"];
@@ -132,6 +142,8 @@ export async function processTurn(
 ): Promise<TurnResult> {
   const { db, llm } = deps;
   const now = deps.now ?? new Date();
+
+  if ((await repo.countSince(db, user.id, "user", dayAgo(now))) >= DAILY_MESSAGE_LIMIT) throw new DailyLimitError();
 
   const [state, stored] = await Promise.all([
     repo.loadBrainState(db, user.id),
@@ -274,6 +286,11 @@ export async function pulse(
   if (!Number.isFinite(waitMin)) return idle;
   if (quietMin < waitMin) {
     return { message: null, values: null, nextInSec: Math.ceil((waitMin - quietMin) * 60) + 1 };
+  }
+
+  // Ημερήσιο ταβάνι, ανεξάρτητο από όλα τα άλλα.
+  if ((await repo.countSince(db, user.id, "proactive", dayAgo(now))) >= DAILY_INITIATIVE_LIMIT) {
+    return { message: null, values: null, nextInSec: 1800 };
   }
 
   const memories = await repo.listMemories(db, user.id);
