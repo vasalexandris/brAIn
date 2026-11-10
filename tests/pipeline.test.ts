@@ -262,7 +262,7 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
       JSON.stringify({ ...state.values, fixation: 95, u_explore: 0 }),
     ]);
     const asked = await processTurn({ db, llm, now: at(1) }, u, "Διάβασες τις ειδήσεις σήμερα;");
-    expect(asked.search).toMatchObject({ source: "news", sourceLabel: "ειδήσεις" });
+    expect(asked.search).toMatchObject({ source: "headlines", sourceLabel: "ειδήσεις της ημέρας" });
     // Το ημερήσιο όριο και η μία εκκρεμότητα εξακολουθούν να ισχύουν.
     expect((await processTurn({ db, llm, now: at(1) }, u, "Δες τις ειδήσεις!")).search).toBeNull();
   });
@@ -452,6 +452,75 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     const read = await resolveSearch({ db, llm: withWeb, now: at(1) }, u, offer.search!.id, true);
     expect(queries).toEqual(["αποτελέσματα NBA χθες"]);
     expect(read!.message).toContain("Αποτελέσματα");
+  });
+
+  it("δεν λέει ποτέ «να το ψάξω;» χωρίς κάρτα, και καταλαβαίνει «ναι», «ψάξτο», «δεν ψάχνεις»", async () => {
+    const u = await createUser(db, { email: "loop@x.gr", name: "Βασίλης", passwordHash: "x" });
+    let clock = new Date("2026-11-09T10:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    const calls: string[] = [];
+    const lookup = async (source: string, query: string) => {
+      calls.push(`${source}:${query}`);
+      return { titles: ["NBA"], text: "## NBA\nΓουόριορς - Σανς 118-109." };
+    };
+    // Όπως στην πράξη: το μοντέλο απαντά μόνο με τη γραμμή-αίτημα, και ο αναστοχασμός δεν λέει τίποτα.
+    let text = "Γεια.";
+    const stuck: LlmProvider = {
+      name: "stuck",
+      embed: llm.embed.bind(llm),
+      generateText: async () => text,
+      generateJson: async (req) =>
+        req.prompt.includes("<υλικό>") ? { message: "Βρήκα: Γουόριορς - Σανς 118-109.", memories: [] } : { perception: {}, impulses: {} },
+    };
+    const maxFixation = async () => {
+      const st = await loadBrainState(db, u.id);
+      await db.query(`UPDATE brain_states SET dims = $2::text::jsonb WHERE user_id = $1`, [
+        u.id,
+        JSON.stringify({ ...st.values, fixation: 100, u_explore: 0 }),
+      ]);
+    };
+
+    // Ρωτά κάτι χωρίς να πει «ψάξε»: προσφέρεται, και η κάρτα υπάρχει — ακόμη και με εμμονή στο 100.
+    await processTurn({ db, llm: stuck, lookup, now: at(1) }, u, "Γεια σου");
+    await maxFixation();
+    text = "[ΨΑΞΕ web: αποτελέσματα NBA χθες]";
+    const offer = await processTurn({ db, llm: stuck, lookup, now: at(1) }, u, "Ξέρεις τα χθεσινά αποτελέσματα του NBA;");
+    expect(offer.reply).toBe("Να το ψάξω;");
+    expect(offer.search).not.toBeNull();
+    expect(calls).toEqual([]);
+
+    // «ναι» με εκκρεμή κάρτα: ψάχνει.
+    const yes = await processTurn({ db, llm: stuck, lookup, now: at(1) }, u, "ναι");
+    expect(yes.reply).toContain("118-109");
+    expect(calls).toHaveLength(1);
+
+    // Παράπονο ότι δεν ψάχνει, και σκέτο «ψάξτο»: είναι εντολές, ψάχνει αμέσως.
+    await maxFixation();
+    const complaint = await processTurn({ db, llm: stuck, lookup, now: at(1) }, u, "δεν βλέπω αποτελέσματα, μάλλον δεν ψάχνεις");
+    expect(complaint.reply).toBe("Το ψάχνω.");
+    expect(complaint.extra).toContain("118-109");
+    expect(complaint.search).toBeNull();
+    const short = await processTurn({ db, llm: stuck, lookup, now: at(1) }, u, "Ναι ψάξτο!");
+    expect(short.extra).toContain("118-109");
+    expect(calls).toHaveLength(3);
+
+    // Λέει «ψάχνω τώρα» χωρίς γραμμή-αίτημα: και πάλι γίνεται κάρτα, με ερώτημα τα λόγια του.
+    text = "Λοιπόν, ψάχνω τώρα για τα αποτελέσματα.";
+    const claims = await processTurn({ db, llm: stuck, lookup, now: at(1) }, u, "Ποια ομάδα κέρδισε χθες το βράδυ στο Σαν Φρανσίσκο;");
+    expect(claims.search).toMatchObject({ source: "web", query: "Ποια ομάδα κέρδισε χθες το βράδυ στο Σαν Φρανσίσκο;" });
+    // «ναι» στη δική της προσφορά, ακόμη κι αν η κάρτα έχει χαθεί.
+    await db.query(`UPDATE searches SET status = 'declined' WHERE id = $1`, [claims.search!.id]);
+    text = "[ΨΑΞΕ web: νικητής Σαν Φρανσίσκο]";
+    const agreed = await processTurn({ db, llm: stuck, lookup, now: at(1) }, u, "ναι");
+    expect(agreed.extra).toContain("118-109");
+
+    // Αν πει ρητά να μην ψάξει, δεν ψάχνει και δεν βγαίνει κάρτα από τα λόγια του.
+    text = "Εντάξει.";
+    const before = calls.length;
+    const no = await processTurn({ db, llm: stuck, lookup, now: at(1) }, u, "Όχι, μην ψάξεις τίποτα άλλο σήμερα.");
+    expect(no.search).toBeNull();
+    expect(no.extra).toBeNull();
+    expect(calls).toHaveLength(before);
   });
 
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {

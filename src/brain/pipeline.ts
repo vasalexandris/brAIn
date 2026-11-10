@@ -201,11 +201,15 @@ const plain = (s: string) =>
 /** Ο συνομιλητής ρωτά για την επικαιρότητα· δεν χρειάζεται μοντέλο για να το καταλάβουμε. */
 const NEWS_INTENT = /ειδησ|επικαιροτητ|τι (εγινε|γινεται|συμβαινει|συνεβη|παιζει).{0,40}(κοσμο|σημερα|χωρα|ελλαδα)/;
 /** Ο συνομιλητής ζητά ρητά αναζήτηση. */
-const SEARCH_INTENT = /ψαξε|ψαξεις|αναζητησ|wikipedia|βικιπαιδ|γκουγκλ|google/;
+const SEARCH_INTENT = /ψαξ|ψαχν|αναζητ|βρες (μου|το|τα|τις|τους)|wikipedia|βικιπαιδ|γκουγκλ|google/;
+/** …ή ζητά ρητά να ΜΗΝ ψάξει. */
+const NO_SEARCH = /(μην?|δεν θελω να|οχι να|σταματα να) .{0,12}(ψαξ|ψαχν)/;
+/** Η ίδια λέει ότι ψάχνει ή ότι θέλει να ψάξει. */
+const SAYS_SEARCHING = /ψαξω|ψαχνω|αναζητησω/;
 
 const AFTER = "(?![a-zα-ω])";
 /** Ο συνομιλητής λέει «ναι» σε πρόταση αναζήτησης που εκκρεμεί. */
-const AFFIRM = new RegExp(`^(ναι|οκ|ok|yes|ενταξει|βεβαια|φυσικα|αμε|εννοειται|καν.?το|γιατι οχι)${AFTER}|ψαξε|προχωρα|την εχεις|εχεις την αδεια`);
+const AFFIRM = new RegExp(`^(ναι|οκ|ok|yes|ενταξει|βεβαια|φυσικα|αμε|εννοειται|καν.?το|γιατι οχι)${AFTER}|ψαξ|προχωρα|την εχεις|εχεις την αδεια`);
 /** …ή «όχι». */
 const DECLINE = new RegExp(`^(οχι|μη|ασε|ασ.?το|δεν θελω|αργοτερα)${AFTER}`);
 
@@ -369,9 +373,60 @@ export async function processTurn(
     temperature: replyTemperature(values),
   });
   const marked = extractSearchMarker(raw);
-  // Όταν της είπε ρητά «ψάξε», το αίτημά του είναι ήδη η άδεια: θα ψάξει αμέσως, χωρίς κάρτα.
-  const commanded = SEARCH_INTENT.test(said);
-  const reply = marked.text || (commanded ? "Το ψάχνω." : "Να το ψάξω;");
+  // Όταν της είπε ρητά να ψάξει — ή απάντησε «ναι» στη δική της προσφορά να ψάξει — το αίτημά του
+  // είναι ήδη η άδεια: θα ψάξει αμέσως, χωρίς κάρτα.
+  const lastOwn = [...stored].reverse().find((m) => m.role === "assistant");
+  const offered = lastOwn ? SAYS_SEARCHING.test(plain(lastOwn.content)) : false;
+  const commanded =
+    !NO_SEARCH.test(said) && (SEARCH_INTENT.test(said) || (offered && said.length <= 80 && AFFIRM.test(said)));
+  const userAsked = commanded || NEWS_INTENT.test(said);
+
+  /** Όταν το μοντέλο δεν έδωσε ερώτημα, ψάχνουμε αυτό που ζήτησε ο συνομιλητής με τα δικά του λόγια. */
+  const fromUser = (): SearchRequest | null => {
+    const texts = [message, ...[...stored].reverse().filter((m) => m.role === "user").map((m) => m.content)];
+    const substantive = texts.find((t) => plain(t).trim().length > 20);
+    return substantive ? { source: "web", query: substantive.trim().slice(0, 120) } : null;
+  };
+
+  type Outcome = "created" | "pending" | "limit" | "declined";
+  /**
+   * Δημιουργεί πρόταση αναζήτησης, αν επιτρέπεται. Ισχύουν πάντα: μία εκκρεμότητα τη φορά και το
+   * ημερήσιο όριο. Οι αυθόρμητες προτάσεις (από τον αναστοχασμό) έχουν επιπλέον αναμονή.
+   */
+  const propose = async (req: SearchRequest, spontaneous: boolean): Promise<[SearchProposal | null, Outcome]> => {
+    const last = await repo.latestSearch(db, user.id);
+    if (last?.status === "pending") {
+      if (!commanded) return [null, "pending"];
+      // Νέα ρητή εντολή: η παλιά πρόταση, που δεν απαντήθηκε, αποσύρεται.
+      await repo.closeSearch(db, user.id, last.id, "declined");
+    }
+    if ((await repo.countSearchesSince(db, user.id, dayAgo(now))) >= DAILY_SEARCH_LIMIT) return [null, "limit"];
+    const recent = last != null && minutesBetween(last.createdAt, now) < SEARCH_COOLDOWN_MIN;
+    if (!userAsked && recent && (spontaneous || last?.status === "declined")) return [null, "declined"];
+    const query = req.source === "headlines" ? HEADLINES_QUERY : req.query;
+    return [toProposal(await repo.createSearch(db, user.id, req.source, query, now)), "created"];
+  };
+
+  // Ό,τι λέει πρέπει να συμφωνεί με ό,τι βλέπει ο συνομιλητής. Γι' αυτό η πρόταση αποφασίζεται
+  // ΠΡΙΝ οριστικοποιηθεί το κείμενο: αν πει «να το ψάξω;», η κάρτα υπάρχει ήδη· αν δεν μπορεί να
+  // υπάρξει, το κείμενο λέει το γιατί. Πηγές αιτήματος, με σειρά: η γραμμή-αίτημα της απάντησης·
+  // το ότι η ίδια λέει πως ψάχνει ή ότι εκείνος το διέταξε (τότε ψάχνουμε αυτό που ζήτησε)· και
+  // ερώτηση για την επικαιρότητα (τότε οι τίτλοι της ημέρας).
+  let search: SearchProposal | null = null;
+  let outcome: Outcome | null = null;
+  const early: SearchRequest | null =
+    marked.request ??
+    (SAYS_SEARCHING.test(plain(marked.text)) || commanded ? fromUser() : null) ??
+    (NEWS_INTENT.test(said) && !NO_SEARCH.test(said) ? { source: "headlines", query: HEADLINES_QUERY } : null);
+  if (early) [search, outcome] = await propose(early, false);
+
+  const FALLBACK: Record<Outcome, string> = {
+    created: commanded ? "Το ψάχνω." : "Να το ψάξω;",
+    pending: "Σου έχω ήδη ζητήσει να ψάξω κάτι. Πες μου αν θες να προχωρήσω.",
+    limit: "Έχω ψάξει αρκετά για σήμερα. Ας το δούμε αύριο.",
+    declined: "Εντάξει, το αφήνω για τώρα.",
+  };
+  const reply = marked.text || (outcome ? FALLBACK[outcome] : "Τι ακριβώς θέλεις να ψάξω;");
 
   // 5. Αναστοχασμός: τι εξέφρασα, τι αξίζει να θυμάμαι, άλλαξε η γνώμη μου;
   const reflection = await llm
@@ -451,34 +506,15 @@ export async function processTurn(
   const impression = reflection.impression || state.impression;
   const selfImage = reflection.selfImage || state.selfImage;
 
-  // 8. Θέλει να ψάξει κάτι; Μόνο αν έχει όρεξη, δεν ζήτησε πρόσφατα, και δεν ξεπέρασε το ημερήσιο όριο.
-  let search: SearchProposal | null = null;
-  // Τρεις πηγές αιτήματος, με σειρά αξιοπιστίας: (α) η γραμμή-αίτημα στην ίδια την απάντηση,
-  // (β) η κρίση του αναστοχασμού, (γ) αν ο συνομιλητής ρώτησε για την επικαιρότητα και καμία από
-  // τις δύο δεν το έπιασε, προτείνονται οι τίτλοι της ημέρας.
-  const userAsked = NEWS_INTENT.test(said) || SEARCH_INTENT.test(said);
-  const spontaneous =
+  // 8. Αν δεν προέκυψε αίτημα από την ίδια την απάντηση, μπορεί να το προτείνει ο αναστοχασμός —
+  //    αυθόρμητα, άρα μόνο με όρεξη, χωρίς εμμονή, και όχι αμέσως μετά από άλλη πρόταση.
+  if (
+    !early &&
     reflection.search &&
     (reflection.search.committed || values.u_explore >= SEARCH_MIN_URGE) &&
-    reflection.search;
-  const request: SearchRequest | null =
-    marked.request ??
-    (spontaneous || null) ??
-    (NEWS_INTENT.test(said) ? { source: "headlines", query: HEADLINES_QUERY } : null);
-
-  if (request) {
-    const last = await repo.latestSearch(db, user.id);
-    // Όταν το ζήτησε εκείνος, οι φραγμοί εμμονής και αναμονής δεν ισχύουν. Η μία εκκρεμότητα
-    // και το ημερήσιο όριο ισχύουν πάντα.
-    const blocked =
-      last?.status === "pending" ||
-      (!userAsked &&
-        (values.fixation >= SEARCH_MAX_FIXATION ||
-          (last != null && minutesBetween(last.createdAt, now) < SEARCH_COOLDOWN_MIN)));
-    if (!blocked && (await repo.countSearchesSince(db, user.id, dayAgo(now))) < DAILY_SEARCH_LIMIT) {
-      const query = request.source === "headlines" ? HEADLINES_QUERY : request.query;
-      search = toProposal(await repo.createSearch(db, user.id, request.source, query, now));
-    }
+    (userAsked || values.fixation < SEARCH_MAX_FIXATION)
+  ) {
+    [search] = await propose(reflection.search, true);
   }
 
   await repo.addMessage(db, user.id, "user", message, { appraisal }, now);
