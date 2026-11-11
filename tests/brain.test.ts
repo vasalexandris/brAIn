@@ -444,3 +444,48 @@ describe("εικόνα εαυτού", () => {
     expect(trimToSentence("λέξη ".repeat(40), 52).endsWith("λέξη…")).toBe(true);
   });
 });
+
+describe("βαθμονόμηση: οι δείκτες δεν κολλάνε στο ταβάνι", () => {
+  const delight = {
+    perception: { p_praise: 80, p_respect: 80, p_kindness: 70, p_interest: 80 },
+    impulses: { joy: 70, curiosity: 60, sociability: 60, excitement: 60, cheerfulness: 60, competence: 50 },
+  };
+
+  it("μια μακριά ευχάριστη κουβέντα ανεβάζει τους δείκτες χωρίς να τους στέλνει στο 100", () => {
+    let v = initialValues();
+    for (let i = 0; i < 40; i++) v = applyAppraisal(applyArrival(applyTime(v, 1.5, 1.5), i * 1.5), delight);
+    for (const key of ["joy", "curiosity", "cheerfulness", "excitement", "competence", "self_esteem", "safety", "pleasure"]) {
+      expect(v[key], key).toBeGreaterThan(initialValues()[key]);
+      expect(v[key], key).toBeLessThan(97);
+    }
+    // Η ανάγκη επαφής χορταίνει όσο η κουβέντα είναι ζωντανή, αντί να ανεβαίνει.
+    expect(v.sociability).toBeLessThan(90);
+  });
+
+  it("κοντά στο ταβάνι το ίδιο ερέθισμα μετρά λιγότερο· οι μειώσεις δεν φρενάρονται", () => {
+    const base = initialValues();
+    const step = (from: number) => applyAppraisal({ ...base, joy: from }, { perception: {}, impulses: { joy: 60 } }).joy - from;
+    expect(step(90)).toBeLessThan(step(40) / 2);
+    expect(step(40)).toBeCloseTo(step(20), 0);
+    const drop = (from: number) => from - applyAppraisal({ ...base, joy: from }, { perception: {}, impulses: { joy: -60 } }).joy;
+    expect(drop(95)).toBeCloseTo(drop(50), 0);
+  });
+
+  it("η πρόοδος δεν γεμίζει με λίγα βήματα", () => {
+    let v = initialValues();
+    for (let i = 0; i < 12; i++) v = applyProgress(v, { learned: 2, lessons: 1 });
+    expect(v.progress).toBeGreaterThan(60);
+    expect(v.progress).toBeLessThan(97);
+  });
+
+  it("η εμβάθυνση δεν είναι εμμονή· η επανάληψη ερωτήσεων είναι", () => {
+    let deep = applyAppraisal(initialValues(), { perception: {}, impulses: {} });
+    let pushy = deep;
+    for (let i = 0; i < 6; i++) {
+      deep = applyActs(deep, ["u_explore", "u_share", "u_help"]);
+      pushy = applyActs(pushy, ["u_ask", "u_insist"]);
+    }
+    expect(deep.fixation).toBe(0);
+    expect(pushy.fixation).toBeGreaterThan(50);
+  });
+});

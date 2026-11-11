@@ -796,6 +796,53 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     expect(read.debug.stored.join(" ")).toContain("Επιβεβαίωσα:");
   });
 
+  it("ανοίγει ιστοσελίδα που της έδωσε ο συνομιλητής ή που είδε σε υλικό, ποτέ διεύθυνση που επινόησε", async () => {
+    const u = await createUser(db, { email: "page@x.gr", name: "Βασίλης", passwordHash: "x" });
+    let clock = new Date("2026-11-12T12:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    const calls: string[] = [];
+    const lookup = async (source: string, query: string) => {
+      calls.push(`${source}:${query}`);
+      return source === "headlines"
+        ? { titles: ["Τίτλος"], text: "## Τίτλος\nΠερίληψη.\nΣύνδεσμος: https://www.ertnews.gr/arthro-1/" }
+        : { titles: ["Άρθρο"], text: "## Άρθρο\nΤο πλήρες κείμενο του άρθρου." };
+    };
+    let text = "Ας το δω.";
+    const model: LlmProvider = {
+      name: "model",
+      embed: llm.embed.bind(llm),
+      generateText: async () => text,
+      generateJson: async (req) =>
+        req.prompt.includes("<υλικό>") ? { found: true, message: "Το διάβασα.", memories: [] } : { perception: {}, impulses: {} },
+    };
+
+    // Ο συνομιλητής δίνει διεύθυνση και ζητά να τη δει: διαβάζεται αμέσως.
+    await processTurn({ db, llm: model, lookup, now: at(1) }, u, "Γεια");
+    const given = await processTurn({ db, llm: model, lookup, now: at(1) }, u, "Διάβασε αυτό: https://example.com/keimeno.");
+    expect(calls).toEqual(["page:https://example.com/keimeno"]);
+    expect(given.extra).toBe("Το διάβασα.");
+
+    // Μια διεύθυνση που απλώς αναφέρεται στην κουβέντα, χωρίς να ζητηθεί ανάγνωση, δεν ανοίγει μόνη της.
+    await processTurn({ db, llm: model, lookup, now: at(15) }, u, "Το site μου είναι https://example.org/ αλλά δεν έχει κάτι ακόμη");
+    expect(calls).toHaveLength(1);
+
+    // Διεύθυνση που "θυμήθηκε" το μοντέλο και δεν υπάρχει πουθενά: αγνοείται.
+    text = "Θα δω την πηγή.\n[ΑΝΟΙΞΕ: https://invented.example.net/news]";
+    const invented = await processTurn({ db, llm: model, lookup, now: at(15) }, u, "Πού μπορώ να μάθω περισσότερα;");
+    expect(invented.reply).toBe("Θα δω την πηγή.");
+    expect(invented.search).toBeNull();
+    expect(calls).toHaveLength(1);
+
+    // Διεύθυνση από υλικό που διάβασε (σύνδεσμος στους τίτλους της ημέρας): επιτρέπεται, με κάρτα.
+    text = "Ας δω τα νέα.";
+    await processTurn({ db, llm: model, lookup, now: at(15) }, u, "Ψάξε τις ειδήσεις της ημέρας");
+    text = "Θέλω να διαβάσω ολόκληρο το άρθρο.\n[ΑΝΟΙΞΕ: https://www.ertnews.gr/arthro-1/]";
+    const fromMaterial = await processTurn({ db, llm: model, lookup, now: at(2) }, u, "Τι λέει αναλυτικά το πρώτο;");
+    expect(fromMaterial.search).toMatchObject({ source: "page", sourceLabel: "ιστοσελίδα", query: "https://www.ertnews.gr/arthro-1/" });
+    await resolveSearch({ db, llm: model, lookup, now: at(1) }, u, fromMaterial.search!.id, true);
+    expect(calls[calls.length - 1]).toBe("page:https://www.ertnews.gr/arthro-1/");
+  });
+
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {
     const broken: LlmProvider = {
       name: "broken",
