@@ -15,15 +15,20 @@ import {
   SAME_MEMORY_SIMILARITY,
   cosine,
   encodeImportance,
+  gistOf,
   recall,
+  rehearse,
   strength,
+  topicIndex,
   type Memory,
   type MemoryKind,
 } from "./memory";
 import { HEADLINES_QUERY, SOURCES, SOURCE_LABELS, lookup as defaultLookup, type Lookup, type Source } from "./world";
 import {
   PERCEIVE_SYSTEM,
+  PLAN_SYSTEM,
   REFLECT_SYSTEM,
+  planPrompt,
   initiativeBlock,
   materialPrompt,
   readingBlock,
@@ -79,6 +84,24 @@ const ACTIVE_LESSONS = 4;
 /** Πάνω από τόση εμμονή δεν ζητά να ψάξει: έχει ήδη κολλήσει. */
 const SEARCH_MAX_FIXATION = 50;
 
+/** Με ποιες υπάρχουσες αναμνήσεις συνδέεται μια νέα: οι δύο πιο συγγενικές, χωρίς να είναι η ίδια. */
+function linksFor(embedding: number[], memories: Memory[]): string[] {
+  return memories
+    .map((m) => ({ id: m.id, sim: cosine(m.embedding, embedding) }))
+    .filter((x) => x.sim >= 0.6 && x.sim < SAME_MEMORY_SIMILARITY)
+    .sort((a, b) => b.sim - a.sim)
+    .slice(0, 2)
+    .map((x) => x.id);
+}
+
+/** Ό,τι χρειάζεται το prompt για να δείξει τη μνήμη σε βάθος: εικόνες των συνδεδεμένων και τα "ράφια". */
+function memoryMap(memories: Memory[], now: Date) {
+  return {
+    gists: Object.fromEntries(memories.map((m) => [m.id, gistOf(m)])),
+    topics: topicIndex(memories, now),
+  };
+}
+
 /** Τα ισχυρότερα ζωντανά ενός είδους. */
 function strongest(memories: Memory[], kind: MemoryKind, now: Date, limit: number): Memory[] {
   return memories
@@ -128,6 +151,8 @@ export interface TurnResult {
     selfImage: string;
     goals: string[];
     lessons: string[];
+    /** Τα ράφια της μνήμης: για ποια θέματα ξέρει ότι ξέρει κάτι. */
+    topics?: string[];
   };
 }
 
@@ -156,7 +181,15 @@ function parseAppraisal(raw: unknown): Appraisal {
 interface Reflection {
   expressed: Record<string, number>;
   acts: string[];
-  memories: { kind: MemoryKind; content: string; importance: number; valence: number }[];
+  memories: {
+    kind: MemoryKind;
+    content: string;
+    gist: string;
+    detail: string;
+    topic: string;
+    importance: number;
+    valence: number;
+  }[];
   resolvedGoals: number[];
   impression: string;
   selfImage: string;
@@ -244,6 +277,9 @@ function parseReflection(raw: unknown): Reflection {
     .map((m) => ({
       kind: MEMORY_KINDS.includes(m.kind as MemoryKind) ? (m.kind as MemoryKind) : ("episode" as MemoryKind),
       content: typeof m.content === "string" ? m.content.trim().slice(0, 500) : "",
+      gist: typeof m.gist === "string" ? m.gist.trim().slice(0, 140) : "",
+      detail: typeof m.detail === "string" ? m.detail.trim().slice(0, 1800) : "",
+      topic: typeof m.topic === "string" ? m.topic.trim().toLowerCase().slice(0, 40) : "",
       importance: clamp(Number(m.importance) || 0),
       valence: clamp(Number(m.valence) || 0, -100, 100) / 100,
     }))
@@ -371,6 +407,7 @@ export async function processTurn(
       selfImage: state.selfImage,
       goals: goalTexts,
       lessons,
+      ...memoryMap(memories, now),
       recalled,
       userName: user.name,
       now,
@@ -400,11 +437,28 @@ export async function processTurn(
     !NO_SEARCH.test(said) && (SEARCH_INTENT.test(said) || (offered && said.length <= 80 && AFFIRM.test(said)));
   const userAsked = commanded || NEWS_INTENT.test(said);
 
-  /** Όταν το μοντέλο δεν έδωσε ερώτημα, ψάχνουμε αυτό που ζήτησε ο συνομιλητής με τα δικά του λόγια. */
-  const fromUser = (): SearchRequest | null => {
+  /**
+   * Όταν δεν υπάρχει έτοιμο ερώτημα, δεν ψάχνουμε τα λόγια του συνομιλητή αυτούσια (μια ολόκληρη
+   * πρόταση κουβέντας δίνει άχρηστα αποτελέσματα): ζητάμε από το μοντέλο να σκεφτεί ΤΙ αξίζει να
+   * ψαχτεί και ΠΟΥ, έχοντας μπροστά του όσα έχει μάθει για το πώς ψάχνει. Μπορεί να απαντήσει και
+   * «τίποτα». Αν η σκέψη αποτύχει, εφεδρικά μένουν τα λόγια του.
+   */
+  const planSearch = async (said: string): Promise<SearchRequest | null> => {
     const texts = [message, ...[...stored].reverse().filter((m) => m.role === "user").map((m) => m.content)];
     const substantive = texts.find((t) => plain(t).trim().length > 20);
-    return substantive ? { source: "web", query: substantive.trim().slice(0, 120) } : null;
+    const fallback: SearchRequest | null = substantive ? { source: "web", query: substantive.trim().slice(0, 120) } : null;
+    const plan = await llm
+      .generateJson({
+        system: PLAN_SYSTEM,
+        prompt: planPrompt({ now, history: history.slice(-6), message, reply: said, lessons }),
+      })
+      .catch(() => null);
+    if (!isRecord(plan) || typeof plan.source !== "string") return fallback;
+    if (plan.source === "none") return null;
+    if (plan.source === "headlines") return { source: "headlines", query: HEADLINES_QUERY };
+    const query = typeof plan.query === "string" ? plan.query.trim().slice(0, 120) : "";
+    if (!query || !SOURCES.includes(plan.source as Source)) return fallback;
+    return { source: plan.source as Source, query };
   };
 
   type Outcome = "created" | "pending" | "limit" | "declined";
@@ -433,10 +487,9 @@ export async function processTurn(
   // ερώτηση για την επικαιρότητα (τότε οι τίτλοι της ημέρας).
   let search: SearchProposal | null = null;
   let outcome: Outcome | null = null;
-  const early: SearchRequest | null =
-    marked.request ??
-    (SAYS_SEARCHING.test(plain(marked.text)) || commanded ? fromUser() : null) ??
-    (NEWS_INTENT.test(said) && !NO_SEARCH.test(said) ? { source: "headlines", query: HEADLINES_QUERY } : null);
+  let early: SearchRequest | null = marked.request;
+  if (!early && NEWS_INTENT.test(said) && !NO_SEARCH.test(said)) early = { source: "headlines", query: HEADLINES_QUERY };
+  if (!early && (commanded || SAYS_SEARCHING.test(plain(marked.text)))) early = await planSearch(marked.text);
   if (early) [search, outcome] = await propose(early, false);
 
   const FALLBACK: Record<Outcome, string> = {
@@ -490,23 +543,18 @@ export async function processTurn(
       (old) => old.kind === m.kind && cosine(old.embedding, embedding) >= SAME_MEMORY_SIMILARITY,
     );
     if (twin) {
-      await repo.reviseMemory(
-        db,
-        twin.id,
-        { content: m.content, importance: Math.max(twin.importance, importance), valence: m.valence, embedding },
-        now,
-      );
+      await repo.reviseMemory(db, twin.id, { ...m, importance: Math.max(twin.importance, importance), embedding }, now);
     } else {
-      await repo.insertMemory(db, user.id, { ...m, importance, embedding }, now);
+      await repo.insertMemory(db, user.id, { ...m, importance, embedding, links: linksFor(embedding, memories) }, now);
     }
     if (m.kind === "knowledge") learned++;
     if (m.kind === "lesson") newLessons.push(m.content);
     storedNow.push(m.content);
   }
+  // Ό,τι ήρθε στο μυαλό γίνεται λίγο πιο προσιτό: ένα επίπεδο βάθους τη φορά.
   await repo.reinforceMemories(
     db,
-    recalled.slice(0, 3).map((r) => r.memory.id),
-    now,
+    recalled.slice(0, 3).map((r) => ({ id: r.memory.id, lastRecalledAt: rehearse(r.memory, now) })),
   );
   // Στόχοι που εκπληρώθηκαν φεύγουν· η ικανοποίηση μένει ως χαρά.
   const resolved = reflection.resolvedGoals.map((n) => goals[n - 1]).filter(Boolean);
@@ -560,11 +608,12 @@ export async function processTurn(
     search,
     debug: {
       note: appraisal.note ?? "",
-      recalled: recalled.map((r) => r.memory.content),
+      recalled: recalled.map((r) => (r.depth === 1 ? `[αχνή] ${gistOf(r.memory)}` : r.memory.content)),
       stored: storedNow,
       impression,
       selfImage,
       lessons: [...lessons, ...newLessons].slice(-ACTIVE_LESSONS),
+      topics: topicIndex(memories, now).map((t) => `${t.topic} (${t.count}${t.fresh ? ", φρέσκο" : ""})`),
       goals: [
         ...goalTexts.filter((g) => !resolved.some((r) => r.content === g)),
         ...reflection.memories.filter((m) => m.kind === "goal" && storedNow.includes(m.content)).map((m) => m.content),
@@ -631,6 +680,7 @@ export async function pulse(
         selfImage: state.selfImage,
         goals: goals.map((g) => g.content),
         lessons,
+        ...memoryMap(memories, now),
         recalled,
         userName: user.name,
         now,
@@ -699,84 +749,141 @@ export async function resolveSearch(
     return { message: SEARCH_FAILED, values, stored: [] };
   };
 
-  let material;
-  try {
-    // Διαδίκτυο: η αναζήτηση του ίδιου του παρόχου, αν υπάρχει· αλλιώς (ή αν αποτύχει) ειδήσεις.
-    const web =
-      search.source === "web" && llm.searchWeb && !deps.lookup
-        ? await llm.searchWeb(search.query).catch((err) => {
-            console.error("[brAIn] η αναζήτηση στο διαδίκτυο απέτυχε, δοκιμάζω ειδήσεις:", err);
-            return null;
-          })
-        : null;
-    material = web?.text ? web : await (deps.lookup ?? defaultLookup)(search.source, search.query);
-  } catch (err) {
-    console.error("[brAIn] η αναζήτηση απέτυχε:", err);
-    return fail();
-  }
-  if (!material.text) return fail();
-  await repo.saveSearchMaterial(db, search.id, material.text.slice(0, 6000));
-
   const memories = await repo.listMemories(db, user.id);
   const { goals, lessons, rest } = splitGoals(memories, now);
   // Τι είχε ζητήσει: το τελευταίο του μήνυμα που δεν ήταν σκέτο «ναι».
   const asked =
     [...stored].reverse().find((m) => m.role === "user" && !AFFIRM.test(plain(m.content).trim()))?.content.slice(0, 300) ?? "";
-  const raw = await llm
-    .generateJson({
-      system:
-        respondSystem({
-          values,
-          impression: state.impression,
-          selfImage: state.selfImage,
-          goals: goals.map((g) => g.content),
-          lessons,
-          recalled: recall(rest, [], valence(values), now, 3),
-          userName: user.name,
-          now,
-          time,
-        }) + readingBlock(SOURCE_LABELS[search.source], search.query, asked),
-      prompt: materialPrompt(material.text),
-    })
-    .catch((err) => {
-      console.error("[brAIn] η ανάγνωση απέτυχε:", err);
+
+  interface Attempt {
+    source: Source;
+    query: string;
+    material: { titles: string[]; text: string };
+    message: string;
+    found: boolean;
+    retry: SearchRequest | null;
+    memories: Reflection["memories"];
+  }
+
+  /** Μία προσπάθεια: ψάχνει, διαβάζει, και κρίνει αν βρήκε αυτό που ζητήθηκε. */
+  const attempt = async (source: Source, query: string, mayRetry: boolean): Promise<Attempt | null> => {
+    let material;
+    try {
+      // Διαδίκτυο: η αναζήτηση του ίδιου του παρόχου, αν υπάρχει· αλλιώς (ή αν αποτύχει) ειδήσεις.
+      const web =
+        source === "web" && llm.searchWeb && !deps.lookup
+          ? await llm.searchWeb(query).catch((err) => {
+              console.error("[brAIn] η αναζήτηση στο διαδίκτυο απέτυχε, δοκιμάζω ειδήσεις:", err);
+              return null;
+            })
+          : null;
+      material = web?.text ? web : await (deps.lookup ?? defaultLookup)(source, query);
+    } catch (err) {
+      console.error("[brAIn] η αναζήτηση απέτυχε:", err);
       return null;
-    });
-  let message = isRecord(raw) && typeof raw.message === "string" ? extractSearchMarker(raw.message).text : "";
-  if (!message) return fail();
+    }
+    if (!material.text) return null;
 
-  // Αν ανέφερε σκορ που δεν υπάρχει στο υλικό, το επινόησε: δεν φτάνει στον συνομιλητή και δεν
-  // γίνεται ανάμνηση.
-  const invented = inventedScores(message, material.text);
-  if (invented.length) {
-    console.warn("[brAIn] απορρίφθηκε απάντηση με αριθμούς εκτός υλικού:", invented.join(", "));
-    message = "Έψαξα, αλλά δεν βρήκα καθαρά αυτό που ζήτησες. Δεν θέλω να σου πω νούμερα που δεν είδα γραμμένα.";
-  }
+    const raw = await llm
+      .generateJson({
+        system:
+          respondSystem({
+            values,
+            impression: state.impression,
+            selfImage: state.selfImage,
+            goals: goals.map((g) => g.content),
+            lessons,
+            recalled: recall(rest, [], valence(values), now, 3),
+            userName: user.name,
+            now,
+            time,
+            ...memoryMap(memories, now),
+          }) + readingBlock(SOURCE_LABELS[source], query, asked, mayRetry),
+        prompt: materialPrompt(material.text),
+      })
+      .catch((err) => {
+        console.error("[brAIn] η ανάγνωση απέτυχε:", err);
+        return null;
+      });
+    if (!isRecord(raw)) return null;
+    let message = typeof raw.message === "string" ? extractSearchMarker(raw.message).text : "";
+    if (!message) return null;
 
-  const learned = invented.length
-    ? []
-    : parseReflection({ memories: isRecord(raw) ? raw.memories : [] })
-        .memories.filter((m) => !inventedScores(m.content, material.text).length)
-        .slice(0, 3);
+    // Αν ανέφερε σκορ που δεν υπάρχει στο υλικό, το επινόησε: δεν φτάνει στον συνομιλητή και δεν
+    // γίνεται ανάμνηση.
+    const invented = inventedScores(message, material.text);
+    if (invented.length) {
+      console.warn("[brAIn] απορρίφθηκε απάντηση με αριθμούς εκτός υλικού:", invented.join(", "));
+      message = "Έψαξα, αλλά δεν βρήκα καθαρά αυτό που ζήτησες. Δεν θέλω να σου πω νούμερα που δεν είδα γραμμένα.";
+    }
+    const next = isRecord(raw.retry) && typeof raw.retry.query === "string" ? raw.retry : null;
+    const nextSource = next && SOURCES.includes(next.source as Source) ? (next.source as Source) : "web";
+    const nextQuery = next ? String(next.query).trim().slice(0, 120) : "";
+    return {
+      source,
+      query,
+      material,
+      message,
+      found: raw.found !== false && !invented.length,
+      // Δεύτερη προσπάθεια μόνο αν αλλάζει κάτι: άλλες λέξεις ή άλλη πηγή.
+      retry: nextQuery && (nextQuery !== query || nextSource !== source) ? { source: nextSource, query: nextQuery } : null,
+      memories: invented.length
+        ? []
+        : parseReflection({ memories: raw.memories }).memories.filter(
+            (m) => !inventedScores(`${m.content} ${m.detail}`, material.text).length,
+          ),
+    };
+  };
+
+  // Εφευρετικότητα με μέτρο: αν η πρώτη προσπάθεια δεν βρήκε αυτό που ζητήθηκε, σκέφτεται άλλο
+  // ερώτημα ή άλλη πηγή και δοκιμάζει ΜΙΑ ακόμη φορά. Όχι περισσότερες: κάθε προσπάθεια κοστίζει.
+  const first = await attempt(search.source, search.query, true);
+  const second = first && !first.found && first.retry ? await attempt(first.retry.source, first.retry.query, false) : null;
+  const best = second?.found ? second : (first ?? second);
+  if (!best) return fail();
+  const { message, material } = best;
+  await repo.saveSearchMaterial(db, search.id, material.text.slice(0, 6000));
+
   const storedNow: string[] = [];
-  for (const m of learned) {
+  const keep = async (m: Reflection["memories"][number], kind: MemoryKind) => {
     const importance = encodeImportance(m.importance, arousal(values));
-    if (importance < MIN_IMPORTANCE) continue;
+    if (importance < MIN_IMPORTANCE) return;
     const embedding = await llm.embed(m.content).catch(() => [] as number[]);
-    await repo.insertMemory(db, user.id, { ...m, kind: "knowledge", importance, embedding }, now);
+    const twin = memories.find((old) => old.kind === kind && cosine(old.embedding, embedding) >= SAME_MEMORY_SIMILARITY);
+    if (twin) await repo.reviseMemory(db, twin.id, { ...m, importance: Math.max(twin.importance, importance), embedding }, now);
+    else await repo.insertMemory(db, user.id, { ...m, kind, importance, embedding, links: linksFor(embedding, memories) }, now);
     storedNow.push(m.content);
+  };
+  for (const m of best.memories.slice(0, 3)) await keep(m, "knowledge");
+
+  // Έμαθε και πώς να ψάχνει: όταν το πρώτο ερώτημα απέτυχε και το δεύτερο πέτυχε, κρατά το μάθημα.
+  // Τα μαθήματα είναι πάντα μπροστά της, άρα το επόμενο ερώτημά της θα είναι καλύτερο.
+  if (first && second?.found) {
+    await keep(
+      {
+        kind: "lesson",
+        content: `Όταν έψαξα «${first.query}» (${SOURCE_LABELS[first.source]}) δεν βρήκα αυτό που ήθελα· με «${second.query}» (${SOURCE_LABELS[second.source]}) το βρήκα.`,
+        gist: "πώς να ψάχνω καλύτερα",
+        detail: "",
+        topic: "αναζήτηση",
+        importance: 50,
+        valence: 0.2,
+      },
+      "lesson",
+    );
   }
+  const learnedCount = best.memories.length ? Math.min(best.memories.length, 3) : 0;
 
   // Έμαθε: η δίψα χορταίνει, και του το χρωστά που την άφησε.
-  values = applyActs(applyExpression(values, {}, storedNow.length), ["u_explore"]);
-  values = applyProgress(values, { learned: storedNow.length });
+  values = applyActs(applyExpression(values, {}, learnedCount), ["u_explore"]);
+  values = applyProgress(values, { learned: learnedCount, lessons: first && second?.found ? 1 : 0 });
   values = { ...values, gratitude: clamp(values.gratitude + 5) };
   await repo.addMessage(
     db,
     user.id,
     "assistant",
     message,
-    { values, search: { source: search.source, query: search.query, titles: material.titles } },
+    { values, search: { source: best.source, query: best.query, titles: material.titles, attempts: second ? 2 : 1 } },
     now,
   );
   await save();

@@ -38,9 +38,24 @@ export class MockProvider implements LlmProvider {
     if (req.prompt.includes("<υλικό>")) {
       const title = /## (.+)/.exec(req.prompt)?.[1] ?? "κάτι";
       return {
+        found: true,
         message: `Διάβασα για «${title}». Δεν το ήξερα έτσι.`,
-        memories: [{ content: `Έμαθα για: ${title}.`, importance: 50, valence: 30 }],
+        memories: [
+          {
+            topic: "γνώσεις",
+            gist: `κάτι για ${title}`,
+            content: `Έμαθα για: ${title}.`,
+            detail: between(req.prompt, "υλικό").slice(0, 300),
+            importance: 50,
+            valence: 30,
+          },
+        ],
       };
+    }
+    if (req.prompt.includes("<σχέδιο>")) {
+      const wanted = between(req.prompt, "ζητούμενο");
+      if (strip(wanted).includes("γενικα")) return { source: "none", query: "" };
+      return { source: "web", query: wanted.replace(/[.;!?]+$/, "").split(/\s+/).slice(-3).join(" ") };
     }
     if (req.prompt.includes("<απάντηση>")) return this.reflect(req.prompt);
     return this.perceive(req.prompt);

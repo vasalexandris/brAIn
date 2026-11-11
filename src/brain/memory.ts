@@ -21,7 +21,16 @@ export const MEMORY_KIND_LABELS: Record<MemoryKind, string> = {
 export interface Memory {
   id: string;
   kind: MemoryKind;
+  /** Επίπεδο 2: τα βασικά, σε μία ή δύο προτάσεις. */
   content: string;
+  /** Επίπεδο 1: μια στιγμιαία εικόνα — «ξέρω ότι κάτι ξέρω γι' αυτό». */
+  gist: string;
+  /** Επίπεδο 3: όλες οι λεπτομέρειες. */
+  detail: string;
+  /** Το "ράφι" όπου αρχειοθετείται (π.χ. αθλητικά, επικαιρότητα, ο συνομιλητής). */
+  topic: string;
+  /** Με ποιες άλλες αναμνήσεις συνδέεται. */
+  links: string[];
   importance: number; // 0–100
   valence: number; // −1…+1, το συναίσθημα με το οποίο δέθηκε
   embedding: number[];
@@ -57,6 +66,61 @@ export function encodeImportance(proposed: number, arousal: number): number {
   return Math.round(Math.min(100, Math.max(0, proposed * (0.75 + 0.6 * arousal))));
 }
 
+/**
+ * Πόσο βαθιά φτάνει η ανάμνηση αυτή τη στιγμή.
+ *   3 — φρέσκια: όλες οι λεπτομέρειες
+ *   2 — μένουν τα βασικά
+ *   1 — μόνο μια εικόνα: ξέρω ότι το ξέρω, όχι το πώς ακριβώς
+ * Οι λεπτομέρειες δεν σβήνονται· γίνονται απρόσιτες, και ξαναβρίσκονται με προσπάθεια (rehearse).
+ */
+export type Depth = 1 | 2 | 3;
+export const DEPTH_DETAIL = 0.6;
+export const DEPTH_ESSENTIALS = 0.25;
+
+export function depthOf(strengthNow: number): Depth {
+  return strengthNow >= DEPTH_DETAIL ? 3 : strengthNow >= DEPTH_ESSENTIALS ? 2 : 1;
+}
+
+/** Η εικόνα της ανάμνησης· αν δεν γράφτηκε ποτέ, οι πρώτες λέξεις των βασικών. */
+export function gistOf(m: Pick<Memory, "gist" | "content">): string {
+  if (m.gist) return m.gist;
+  const words = m.content.split(/\s+/);
+  return words.length <= 9 ? m.content : `${words.slice(0, 9).join(" ")}…`;
+}
+
+/** Πόσο ανεβαίνει η ισχύς με κάθε ανάκληση: περίπου ένα επίπεδο βάθους. */
+const REHEARSAL_GAIN = 0.35;
+
+/**
+ * Η ανάκληση ως προσπάθεια: κάθε φορά που κάτι έρχεται στο μυαλό, γίνεται λίγο πιο προσιτό —
+ * ένα επίπεδο τη φορά, όχι όλα μαζί. Επιστρέφει το νέο "πότε το θυμήθηκα τελευταία" που αντιστοιχεί
+ * στην αυξημένη ισχύ. Έτσι, όσο η κουβέντα επιμένει σε κάτι, ξαναβρίσκει τα βασικά και μετά τις
+ * λεπτομέρειες, όπως κι εμείς.
+ */
+export function rehearse(m: Pick<Memory, "importance" | "recallCount" | "lastRecalledAt">, now: Date): Date {
+  const target = Math.min(1, strength(m, now) + REHEARSAL_GAIN);
+  if (target >= 1) return now;
+  // Η επόμενη ανάκληση μετρά με ένα recall παραπάνω, άρα με μεγαλύτερη σταθερότητα.
+  const days = stabilityDays(m.importance, m.recallCount + 1) * Math.log2(1 / target);
+  return new Date(now.getTime() - days * DAY_MS);
+}
+
+/** Τα θέματα για τα οποία "ξέρει ότι ξέρει κάτι", με τα πιο φρέσκα πρώτα. */
+export function topicIndex(memories: Memory[], now: Date, limit = 10): { topic: string; count: number; fresh: boolean }[] {
+  const shelves = new Map<string, { count: number; latest: number }>();
+  for (const m of memories) {
+    if (!m.topic || strength(m, now) < FORGOTTEN_BELOW) continue;
+    const shelf = shelves.get(m.topic) ?? { count: 0, latest: 0 };
+    shelf.count++;
+    shelf.latest = Math.max(shelf.latest, m.createdAt.getTime());
+    shelves.set(m.topic, shelf);
+  }
+  return [...shelves.entries()]
+    .sort((a, b) => b[1].latest - a[1].latest)
+    .slice(0, limit)
+    .map(([topic, shelf]) => ({ topic, count: shelf.count, fresh: now.getTime() - shelf.latest < DAY_MS }));
+}
+
 export function cosine(a: number[], b: number[]): number {
   const n = Math.min(a.length, b.length);
   let dot = 0;
@@ -75,6 +139,8 @@ export interface Recalled {
   score: number;
   similarity: number;
   strength: number;
+  /** Πόσο βαθιά φτάνει αυτή τη στιγμή. */
+  depth: Depth;
 }
 
 /**
@@ -95,7 +161,7 @@ export function recall(
       const similarity = cosine(cue, memory.embedding);
       const congruence = 1 - Math.abs(memory.valence - moodValence) / 2;
       const score = similarity * 0.6 + s * 0.2 + (memory.importance / 100) * 0.1 + congruence * 0.1;
-      return { memory, score, similarity, strength: s };
+      return { memory, score, similarity, strength: s, depth: depthOf(s) };
     })
     .filter((r) => r.strength >= FORGOTTEN_BELOW);
 

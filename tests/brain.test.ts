@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { DIMENSIONS } from "@/brain/dimensions";
-import { cosine, encodeImportance, recall, strength, type Memory } from "@/brain/memory";
+import {
+  cosine,
+  depthOf,
+  encodeImportance,
+  gistOf,
+  recall,
+  rehearse,
+  strength,
+  topicIndex,
+  type Memory,
+} from "@/brain/memory";
 import { trimToSentence } from "@/brain/prompts";
 import {
   applyActs,
@@ -78,6 +88,10 @@ describe("μνήμη", () => {
     id: Math.random().toString(),
     kind: "episode",
     content: "",
+    gist: "",
+    detail: "",
+    topic: "",
+    links: [],
     importance: 50,
     valence: 0,
     embedding: [1, 0],
@@ -113,6 +127,56 @@ describe("μνήμη", () => {
     const bright = mem({ content: "γλυκό", valence: 1 });
     expect(recall([bright, dark], [1, 0], -1, now)[0].memory.content).toBe("πικρό");
     expect(cosine([1, 2], [2, 4])).toBeCloseTo(1);
+  });
+
+  it("τρία επίπεδα βάθους: φρέσκια με λεπτομέρειες, μετά τα βασικά, στο τέλος μόνο μια εικόνα", () => {
+    const m = (days: number) => mem({ importance: 50, lastRecalledAt: daysAgo(days) });
+    expect(recall([m(0)], [1, 0], 0, now)[0].depth).toBe(3);
+    expect(recall([m(20)], [1, 0], 0, now)[0].depth).toBe(2);
+    expect(recall([m(50)], [1, 0], 0, now)[0].depth).toBe(1);
+    expect(depthOf(1)).toBe(3);
+    expect(depthOf(0.3)).toBe(2);
+    expect(depthOf(0.1)).toBe(1);
+    // Τα ασήμαντα χάνουν τις λεπτομέρειές τους σε μέρες· τα σημαντικά τις κρατούν μήνες.
+    expect(depthOf(strength(mem({ importance: 20, lastRecalledAt: daysAgo(4) }), now))).toBeLessThan(3);
+    expect(depthOf(strength(mem({ importance: 85, lastRecalledAt: daysAgo(30) }), now))).toBe(3);
+  });
+
+  it("η εικόνα της ανάμνησης: η γραμμένη, αλλιώς οι πρώτες λέξεις των βασικών", () => {
+    expect(gistOf({ gist: "η δουλειά του", content: "οτιδήποτε" })).toBe("η δουλειά του");
+    expect(gistOf({ gist: "", content: "Σύντομο." })).toBe("Σύντομο.");
+    expect(gistOf({ gist: "", content: "μία δύο τρεις τέσσερις πέντε έξι επτά οκτώ εννιά δέκα έντεκα" })).toBe(
+      "μία δύο τρεις τέσσερις πέντε έξι επτά οκτώ εννιά…",
+    );
+  });
+
+  it("με την επιμονή ξαναβρίσκει: κάθε ανάκληση ένα επίπεδο πιο βαθιά, όχι όλα μαζί", () => {
+    let m = mem({ importance: 50, lastRecalledAt: daysAgo(50) });
+    const depths = [depthOf(strength(m, now))];
+    for (let i = 0; i < 3; i++) {
+      m = { ...m, lastRecalledAt: rehearse(m, now), recallCount: m.recallCount + 1 };
+      depths.push(depthOf(strength(m, now)));
+    }
+    expect(depths).toEqual([1, 2, 3, 3]);
+    // Μια φρέσκια ανάμνηση απλώς μένει φρέσκια.
+    expect(rehearse(mem({}), now).getTime()).toBe(now.getTime());
+  });
+
+  it("ξέρει τι ξέρει: τα ράφια της μνήμης, με τα πιο φρέσκα πρώτα και χωρίς τα ξεχασμένα", () => {
+    const shelves = topicIndex(
+      [
+        mem({ topic: "αθλητικά", createdAt: daysAgo(0) }),
+        mem({ topic: "αθλητικά", createdAt: daysAgo(3) }),
+        mem({ topic: "επιστήμη", createdAt: daysAgo(5) }),
+        mem({ topic: "παλιά", importance: 16, createdAt: daysAgo(200), lastRecalledAt: daysAgo(200) }),
+        mem({ topic: "" }),
+      ],
+      now,
+    );
+    expect(shelves).toEqual([
+      { topic: "αθλητικά", count: 2, fresh: true },
+      { topic: "επιστήμη", count: 1, fresh: false },
+    ]);
   });
 
   it("η ίδια σκέψη με άλλα λόγια ανακαλείται μία φορά, και μένει χώρος για κάτι διαφορετικό", () => {

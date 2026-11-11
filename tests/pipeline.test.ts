@@ -571,6 +571,147 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     expect(system).not.toContain("ΤΙ ΔΙΑΒΑΣΕΣ ΠΡΟΣΦΑΤΑ");
   });
 
+  it("η γνώση αρχειοθετείται σε τρία επίπεδα: με τον καιρό μένει μια εικόνα, και με την επιμονή ξαναβρίσκεται", async () => {
+    const u = await createUser(db, { email: "deep@x.gr", name: "Βασίλης", passwordHash: "x" });
+    let clock = new Date("2026-06-01T10:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    const lookup = async () => ({ titles: ["Κβάζαρ"], text: "## Κβάζαρ\nΤο 3C 273 απέχει 2,4 δισεκατομμύρια έτη φωτός." });
+    let system = "";
+    const model: LlmProvider = {
+      name: "model",
+      embed: llm.embed.bind(llm),
+      generateText: async (req) => {
+        system = req.system;
+        return "Εντάξει.";
+      },
+      generateJson: async (req) =>
+        req.prompt.includes("<υλικό>")
+          ? {
+              found: true,
+              message: "Διάβασα για τα κβάζαρ.",
+              memories: [
+                {
+                  topic: "Αστρονομία",
+                  gist: "κάτι για τα κβάζαρ",
+                  content: "Έμαθα ότι τα κβάζαρ είναι φωτεινοί γαλαξιακοί πυρήνες.",
+                  detail: "Το 3C 273 απέχει 2,4 δισεκατομμύρια έτη φωτός.",
+                  importance: 50,
+                  valence: 30,
+                },
+              ],
+            }
+          : { perception: {}, impulses: {} },
+    };
+    await processTurn({ db, llm: model, lookup, now: at(1) }, u, "Γεια σου!");
+    const offer = await processTurn({ db, llm, lookup, now: at(1) }, u, "Ξέρεις τι είναι τα κβάζαρ;");
+    await resolveSearch({ db, llm: model, lookup, now: at(1) }, u, offer.search!.id, true);
+    const stored = (await listMemories(db, u.id)).find((m) => m.topic === "αστρονομία")!;
+    expect(stored).toMatchObject({ gist: "κάτι για τα κβάζαρ", detail: "Το 3C 273 απέχει 2,4 δισεκατομμύρια έτη φωτός." });
+
+    // Την επόμενη μέρα: φρέσκια, με όλες τις λεπτομέρειες, και το ράφι φαίνεται στο «τι ξέρεις ότι ξέρεις».
+    await processTurn({ db, llm: model, lookup, now: at(20 * 60) }, u, "Πες μου για τα κβάζαρ, τους γαλαξιακούς πυρήνες");
+    expect(system).toContain("αστρονομία (1, φρέσκο)");
+    expect(system).toContain("Λεπτομέρειες: Το 3C 273");
+
+    // Δύο μήνες μετά, χωρίς να έχει ξαναγίνει κουβέντα: μόνο η εικόνα. Οι λεπτομέρειες δεν φαίνονται.
+    const faint = await processTurn({ db, llm: model, lookup, now: at(60 * 24 * 60) }, u, "Θυμάσαι τα κβάζαρ, τους γαλαξιακούς πυρήνες;");
+    expect(system).toContain("[αχνή] κάτι για τα κβάζαρ");
+    expect(system).not.toContain("3C 273");
+    expect(faint.debug.recalled).toContain("[αχνή] κάτι για τα κβάζαρ");
+
+    // Η κουβέντα επιμένει: πρώτα επιστρέφουν τα βασικά, μετά και οι λεπτομέρειες.
+    await processTurn({ db, llm: model, lookup, now: at(1) }, u, "Τα κβάζαρ, οι φωτεινοί γαλαξιακοί πυρήνες. Σκέψου.");
+    expect(system).toContain("Έμαθα ότι τα κβάζαρ είναι φωτεινοί γαλαξιακοί πυρήνες.");
+    expect(system).not.toContain("3C 273");
+    await processTurn({ db, llm: model, lookup, now: at(1) }, u, "Κβάζαρ, γαλαξιακοί πυρήνες. Τι άλλο θυμάσαι;");
+    expect(system).toContain("Λεπτομέρειες: Το 3C 273");
+  });
+
+  it("σκέφτεται τι θα ψάξει αντί να ψάχνει τα λόγια του αυτούσια, και ξέρει πότε δεν υπάρχει κάτι να ψαχτεί", async () => {
+    const u = await createUser(db, { email: "plan@x.gr", name: "Βασίλης", passwordHash: "x" });
+    let clock = new Date("2026-11-11T08:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    let text = "Θα μπορούσα να ψάχνω τις ειδήσεις κάθε μέρα, τι λες;";
+    let plan: unknown = { source: "none", query: "" };
+    let planPrompt = "";
+    const model: LlmProvider = {
+      name: "model",
+      embed: llm.embed.bind(llm),
+      generateText: async () => text,
+      generateJson: async (req) => {
+        if (req.prompt.includes("<σχέδιο>")) {
+          planPrompt = req.prompt;
+          return plan;
+        }
+        return { perception: {}, impulses: {} };
+      },
+    };
+    const long = "εγώ θα ήθελα ανάλογα με τα ενδιαφέροντά σου να θες να μαθαίνεις, να μπορώ να κάνω συζήτηση μαζί σου γι' αυτό";
+
+    // Το μοντέλο κρίνει ότι δεν υπάρχει κάτι συγκεκριμένο: καμία κάρτα, κανένα σκουπίδι-ερώτημα.
+    await processTurn({ db, llm: model, now: at(1) }, u, "Γεια");
+    const none = await processTurn({ db, llm: model, now: at(1) }, u, long);
+    expect(none.search).toBeNull();
+    expect(planPrompt).toContain("Θα μπορούσα να ψάχνω τις ειδήσεις κάθε μέρα");
+
+    // Κρίνει ότι θέλει τους τίτλους της ημέρας.
+    plan = { source: "headlines", query: "ό,τι να 'ναι" };
+    expect((await processTurn({ db, llm: model, now: at(15) }, u, long)).search).toMatchObject({ source: "headlines" });
+    await db.query(`UPDATE searches SET status = 'declined' WHERE user_id = $1`, [u.id]);
+
+    // Διατυπώνει σύντομο ερώτημα, όχι ολόκληρη την πρόταση.
+    plan = { source: "web", query: "σεισμός Κρήτη σήμερα" };
+    text = "Να το ψάξω αυτό.";
+    const q = await processTurn({ db, llm: model, now: at(15) }, u, "Άκουσα κάτι για έναν σεισμό στην Κρήτη σήμερα το πρωί, δεν ξέρω λεπτομέρειες");
+    expect(q.search).toMatchObject({ source: "web", query: "σεισμός Κρήτη σήμερα" });
+  });
+
+  it("αν δεν βρει, σκέφτεται άλλο ερώτημα και ξαναδοκιμάζει μία φορά· αν πετύχει, κρατά το μάθημα", async () => {
+    const u = await createUser(db, { email: "retry@x.gr", name: "Βασίλης", passwordHash: "x" });
+    let clock = new Date("2026-11-11T09:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    const calls: string[] = [];
+    const lookup = async (source: string, query: string) => {
+      calls.push(`${source}:${query}`);
+      return query.includes("Ολυμπιακός")
+        ? { titles: ["Αγώνας"], text: "## Αγώνας\nΟλυμπιακός - Ρεάλ 88-79." }
+        : { titles: ["Μποτάκια"], text: "## Γυναικεία μποτάκια\nΠροσφορές." };
+    };
+    let retry: unknown = { source: "web", query: "Ολυμπιακός Ρεάλ αποτέλεσμα" };
+    const model: LlmProvider = {
+      name: "model",
+      embed: llm.embed.bind(llm),
+      generateText: async () => "[ΨΑΞΕ web: μπάσκετ χθες]",
+      generateJson: async (req) => {
+        if (!req.prompt.includes("<υλικό>")) return { perception: {}, impulses: {} };
+        if (req.prompt.includes("μποτάκια")) return { found: false, message: "Δεν βρήκα κάτι σχετικό.", retry, memories: [] };
+        return { found: true, message: "Ολυμπιακός - Ρεάλ 88-79.", memories: [] };
+      },
+    };
+    await processTurn({ db, llm: model, lookup, now: at(1) }, u, "Γεια");
+    await db.query(`UPDATE searches SET status = 'declined' WHERE user_id = $1`, [u.id]);
+
+    const done = await processTurn({ db, llm: model, lookup, now: at(15) }, u, "Ψάξε πώς πήγε χθες το μπάσκετ");
+    expect(calls).toEqual(["web:μπάσκετ χθες", "web:Ολυμπιακός Ρεάλ αποτέλεσμα"]);
+    expect(done.extra).toBe("Ολυμπιακός - Ρεάλ 88-79.");
+    const lesson = (await listMemories(db, u.id)).find((m) => m.kind === "lesson");
+    expect(lesson?.content).toContain("«μπάσκετ χθες»");
+    expect(lesson?.content).toContain("«Ολυμπιακός Ρεάλ αποτέλεσμα»");
+    expect(lesson?.topic).toBe("αναζήτηση");
+
+    // Αν και η δεύτερη αποτύχει, το λέει· δεν δοκιμάζει τρίτη.
+    calls.length = 0;
+    retry = { source: "wikipedia", query: "άλλα μποτάκια" };
+    const failed = await processTurn({ db, llm: model, lookup, now: at(15) }, u, "Ψάξε ξανά κάτι άλλο για το μπάσκετ");
+    expect(calls).toHaveLength(2);
+    expect(failed.extra).toBe("Δεν βρήκα κάτι σχετικό.");
+    // Ίδιο ερώτημα στην ίδια πηγή δεν είναι "άλλη προσπάθεια".
+    calls.length = 0;
+    retry = { source: "web", query: "μπάσκετ χθες" };
+    await processTurn({ db, llm: model, lookup, now: at(15) }, u, "Ψάξε το πάλι");
+    expect(calls).toHaveLength(1);
+  });
+
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {
     const broken: LlmProvider = {
       name: "broken",
