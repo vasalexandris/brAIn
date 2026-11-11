@@ -7,7 +7,8 @@ import { resolveSearch } from "@/brain/pipeline";
 import { getDb } from "@/db";
 import { getLlm } from "@/llm";
 
-export const maxDuration = 60;
+// Ένας γύρος με αναζήτηση και δεύτερη προσπάθεια κάνει αρκετές κλήσεις στη σειρά.
+export const maxDuration = 120;
 
 /** Ο συνομιλητής εγκρίνει ή αρνείται μια αναζήτηση που πρότεινε ο εγκέφαλος. */
 export async function POST(req: Request) {

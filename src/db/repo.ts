@@ -133,6 +133,10 @@ const toMemory = (r: any): Memory => ({
   id: r.id,
   kind: r.kind as MemoryKind,
   content: r.content,
+  gist: r.gist ?? "",
+  detail: r.detail ?? "",
+  topic: r.topic ?? "",
+  links: Array.isArray(r.links) ? r.links : [],
   importance: Number(r.importance),
   valence: Number(r.valence),
   embedding: r.embedding,
@@ -145,30 +149,52 @@ export async function listMemories(db: Db, userId: string): Promise<Memory[]> {
   return (await db.query(`SELECT * FROM memories WHERE user_id = $1`, [userId])).map(toMemory);
 }
 
-export async function insertMemory(
-  db: Db,
-  userId: string,
-  m: { kind: MemoryKind; content: string; importance: number; valence: number; embedding: number[] },
-  now: Date,
-): Promise<void> {
+export interface MemoryInput {
+  kind: MemoryKind;
+  content: string;
+  gist?: string;
+  detail?: string;
+  topic?: string;
+  links?: string[];
+  importance: number;
+  valence: number;
+  embedding: number[];
+}
+
+export async function insertMemory(db: Db, userId: string, m: MemoryInput, now: Date): Promise<void> {
   await db.query(
-    `INSERT INTO memories (id, user_id, kind, content, importance, valence, embedding, created_at, last_recalled_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::text::jsonb, $8, $8)`,
-    [randomUUID(), userId, m.kind, m.content, m.importance, m.valence, JSON.stringify(m.embedding), now.toISOString()],
+    `INSERT INTO memories (id, user_id, kind, content, importance, valence, embedding, created_at, last_recalled_at,
+                           gist, detail, topic, links)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::text::jsonb, $8, $8, $9, $10, $11, $12::text::jsonb)`,
+    [
+      randomUUID(),
+      userId,
+      m.kind,
+      m.content,
+      m.importance,
+      m.valence,
+      JSON.stringify(m.embedding),
+      now.toISOString(),
+      m.gist ?? "",
+      m.detail ?? "",
+      m.topic ?? "",
+      JSON.stringify(m.links ?? []),
+    ],
   );
 }
 
-/** Αναθεώρηση υπάρχουσας ανάμνησης: νέο περιεχόμενο και συναίσθημα, ενισχυμένη ισχύς. */
-export async function reviseMemory(
-  db: Db,
-  id: string,
-  m: { content: string; importance: number; valence: number; embedding: number[] },
-  now: Date,
-): Promise<void> {
+/**
+ * Αναθεώρηση υπάρχουσας ανάμνησης: νέο περιεχόμενο και συναίσθημα, ενισχυμένη ισχύς.
+ * Ό,τι επίπεδο δεν δοθεί εκ νέου, μένει όπως ήταν.
+ */
+export async function reviseMemory(db: Db, id: string, m: Omit<MemoryInput, "kind" | "links">, now: Date): Promise<void> {
   await db.query(
     `UPDATE memories SET content = $2, importance = $3, valence = $4, embedding = $5::text::jsonb,
-            recall_count = recall_count + 1, last_recalled_at = $6 WHERE id = $1`,
-    [id, m.content, m.importance, m.valence, JSON.stringify(m.embedding), now.toISOString()],
+            recall_count = recall_count + 1, last_recalled_at = $6,
+            gist = COALESCE(NULLIF($7, ''), gist), detail = COALESCE(NULLIF($8, ''), detail),
+            topic = COALESCE(NULLIF($9, ''), topic)
+      WHERE id = $1`,
+    [id, m.content, m.importance, m.valence, JSON.stringify(m.embedding), now.toISOString(), m.gist ?? "", m.detail ?? "", m.topic ?? ""],
   );
 }
 
@@ -176,12 +202,15 @@ export async function deleteMemories(db: Db, ids: string[]): Promise<void> {
   for (const id of ids) await db.query(`DELETE FROM memories WHERE id = $1`, [id]);
 }
 
-/** Ό,τι ανακαλείται, δυναμώνει. */
-export async function reinforceMemories(db: Db, ids: string[], now: Date): Promise<void> {
-  for (const id of ids) {
+/**
+ * Ό,τι ανακαλείται, δυναμώνει — σταδιακά: κάθε ανάκληση μετακινεί το "πότε το θυμήθηκα τελευταία"
+ * όσο λέει ο καλών (βλ. rehearse στο memory.ts), όχι κατευθείαν στο τώρα.
+ */
+export async function reinforceMemories(db: Db, items: { id: string; lastRecalledAt: Date }[]): Promise<void> {
+  for (const item of items) {
     await db.query(`UPDATE memories SET recall_count = recall_count + 1, last_recalled_at = $2 WHERE id = $1`, [
-      id,
-      now.toISOString(),
+      item.id,
+      item.lastRecalledAt.toISOString(),
     ]);
   }
 }

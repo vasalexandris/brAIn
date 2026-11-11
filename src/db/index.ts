@@ -76,6 +76,13 @@ CREATE TABLE IF NOT EXISTS memories (
   last_recalled_at timestamptz NOT NULL
 );
 CREATE INDEX IF NOT EXISTS memories_user ON memories (user_id);
+
+-- Τρία επίπεδα βάθους για κάθε ανάμνηση: gist (μια εικόνα), content (τα βασικά), detail (τα πάντα).
+-- topic: σε ποιο "ράφι" αρχειοθετείται. links: με ποιες άλλες αναμνήσεις συνδέεται.
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS gist text NOT NULL DEFAULT '';
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS detail text NOT NULL DEFAULT '';
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS topic text NOT NULL DEFAULT '';
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS links jsonb NOT NULL DEFAULT '[]';
 `;
 
 /** Ενσωματωμένη βάση. `dataDir` κενό = μόνο στη μνήμη (για tests). */

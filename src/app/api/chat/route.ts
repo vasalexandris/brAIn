@@ -7,7 +7,8 @@ import { DailyLimitError, processTurn } from "@/brain/pipeline";
 import { getDb } from "@/db";
 import { getLlm } from "@/llm";
 
-export const maxDuration = 60;
+// Ένας γύρος με αναζήτηση και δεύτερη προσπάθεια κάνει αρκετές κλήσεις στη σειρά.
+export const maxDuration = 120;
 
 export async function POST(req: Request) {
   const user = await currentUser();
