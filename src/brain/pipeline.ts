@@ -16,6 +16,7 @@ import {
   cosine,
   encodeImportance,
   gistOf,
+  periphery,
   recall,
   rehearse,
   strength,
@@ -76,7 +77,11 @@ export class DailyLimitError extends Error {}
 
 /** Πόσα πρόσφατα μηνύματα μένουν στην "άμεση" μνήμη εργασίας. */
 const WORKING_MEMORY = 16;
-const MEMORY_KINDS: MemoryKind[] = ["user_fact", "episode", "knowledge", "opinion", "self", "goal", "lesson"];
+const MEMORY_KINDS: MemoryKind[] = ["user_fact", "episode", "knowledge", "opinion", "self", "goal", "lesson", "hypothesis"];
+/** Πόσες ανεπιβεβαίωτες υποθέσεις έχει μπροστά της ταυτόχρονα. */
+const ACTIVE_HYPOTHESES = 3;
+/** Καμία υπόθεση δεν γεννιέται πιο σίγουρη από τόσο: δεν είναι γνώση ώσπου να επαληθευτεί. */
+const MAX_NEW_CERTAINTY = 0.6;
 /** Πόσους στόχους έχει "στο μυαλό" της ταυτόχρονα. */
 const ACTIVE_GOALS = 3;
 /** Πόσα μαθήματα για τον εαυτό της έχει πάντα μπροστά της. */
@@ -102,6 +107,56 @@ function memoryMap(memories: Memory[], now: Date) {
   };
 }
 
+interface Verdict {
+  n: number;
+  verdict: "confirmed" | "refuted";
+  evidence: string;
+}
+
+function parseVerdicts(raw: unknown): Verdict[] {
+  return (Array.isArray(raw) ? raw : [])
+    .filter(isRecord)
+    .map((v) => ({
+      n: Number(v.n),
+      verdict: v.verdict === "refuted" ? ("refuted" as const) : ("confirmed" as const),
+      evidence: typeof v.evidence === "string" ? v.evidence.trim().slice(0, 400) : "",
+      valid: v.verdict === "confirmed" || v.verdict === "refuted",
+    }))
+    // Χωρίς συγκεκριμένο τεκμήριο δεν κρίνεται τίποτα.
+    .filter((v) => v.valid && Number.isInteger(v.n) && v.evidence.length >= 8);
+}
+
+/**
+ * Κρίνει υποθέσεις με βάση εξωτερικό τεκμήριο (κάτι που είπε ο συνομιλητής ή υλικό που διάβασε).
+ * Η επιβεβαιωμένη γίνεται γνώση· η διαψευσμένη γίνεται κι αυτή γνώση — του λάθους της.
+ */
+async function settle(db: Db, verdicts: Verdict[], hypotheses: Memory[], source: string, now: Date) {
+  let confirmed = 0;
+  let refuted = 0;
+  const notes: string[] = [];
+  for (const v of verdicts) {
+    const h = hypotheses[v.n - 1];
+    if (!h) continue;
+    const how = `${v.verdict === "confirmed" ? "Επιβεβαιώθηκε" : "Διαψεύστηκε"} (${source}): ${v.evidence}`;
+    const detail = [h.detail, how].filter(Boolean).join("\n");
+    if (v.verdict === "confirmed") {
+      await repo.settleHypothesis(db, h.id, { content: h.content, gist: gistOf(h), detail }, now);
+      notes.push(`Επιβεβαίωσα: ${h.content}`);
+      confirmed++;
+    } else {
+      await repo.settleHypothesis(
+        db,
+        h.id,
+        { content: `Υπέθεσα ότι: ${h.content} Αποδείχθηκε λάθος.`, gist: `λάθος υπόθεση: ${gistOf(h)}`, detail },
+        now,
+      );
+      notes.push(`Διαψεύστηκε: ${h.content}`);
+      refuted++;
+    }
+  }
+  return { confirmed, refuted, notes };
+}
+
 /** Τα ισχυρότερα ζωντανά ενός είδους. */
 function strongest(memories: Memory[], kind: MemoryKind, now: Date, limit: number): Memory[] {
   return memories
@@ -118,7 +173,9 @@ function splitGoals(memories: Memory[], now: Date) {
   return {
     goals: strongest(memories, "goal", now, ACTIVE_GOALS),
     lessons: strongest(memories, "lesson", now, ACTIVE_LESSONS).map((m) => m.content),
-    rest: memories.filter((m) => m.kind !== "goal" && m.kind !== "lesson"),
+    // Οι υποθέσεις κρατιούνται χωριστά από τη γνώση, για να μην περάσουν ποτέ για γεγονότα.
+    hypotheses: strongest(memories, "hypothesis", now, ACTIVE_HYPOTHESES),
+    rest: memories.filter((m) => m.kind !== "goal" && m.kind !== "lesson" && m.kind !== "hypothesis"),
   };
 }
 
@@ -153,6 +210,8 @@ export interface TurnResult {
     lessons: string[];
     /** Τα ράφια της μνήμης: για ποια θέματα ξέρει ότι ξέρει κάτι. */
     topics?: string[];
+    /** Οι ανεπιβεβαίωτες υποθέσεις της. */
+    hypotheses?: string[];
   };
 }
 
@@ -187,9 +246,11 @@ interface Reflection {
     gist: string;
     detail: string;
     topic: string;
+    certainty: number;
     importance: number;
     valence: number;
   }[];
+  verdicts: Verdict[];
   resolvedGoals: number[];
   impression: string;
   selfImage: string;
@@ -280,6 +341,8 @@ function parseReflection(raw: unknown): Reflection {
       gist: typeof m.gist === "string" ? m.gist.trim().slice(0, 140) : "",
       detail: typeof m.detail === "string" ? m.detail.trim().slice(0, 1800) : "",
       topic: typeof m.topic === "string" ? m.topic.trim().toLowerCase().slice(0, 40) : "",
+      // Μόνο οι υποθέσεις έχουν βεβαιότητα κάτω από 1, και ποτέ πάνω από το όριο.
+      certainty: m.kind === "hypothesis" ? clamp(Number(m.certainty) || 40, 10, MAX_NEW_CERTAINTY * 100) / 100 : 1,
       importance: clamp(Number(m.importance) || 0),
       valence: clamp(Number(m.valence) || 0, -100, 100) / 100,
     }))
@@ -289,6 +352,7 @@ function parseReflection(raw: unknown): Reflection {
     expressed: numbers(r.expressed, INNER_KEYS),
     acts: (Array.isArray(r.acts) ? r.acts : []).filter((a): a is string => URGE_KEYS.includes(a as string)),
     memories,
+    verdicts: parseVerdicts(r.verdicts),
     resolvedGoals: (Array.isArray(r.resolved_goals) ? r.resolved_goals : []).map(Number).filter(Number.isInteger),
     impression: typeof r.impression === "string" ? r.impression.trim().slice(0, 600) : "",
     selfImage: typeof r.self_image === "string" ? trimToSentence(r.self_image, SELF_IMAGE_MAX + 50) : "",
@@ -394,8 +458,9 @@ export async function processTurn(
 
   // 3. Ανάκληση: τι του θυμίζει αυτό, στη διάθεση που βρίσκεται.
   const memories = await repo.listMemories(db, user.id);
-  const { goals, lessons, rest } = splitGoals(memories, now);
+  const { goals, lessons, hypotheses, rest } = splitGoals(memories, now);
   const goalTexts = goals.map((g) => g.content);
+  const open = hypotheses.map((h) => ({ content: h.content, certainty: h.certainty }));
   const material = await repo.recentMaterial(db, user.id, new Date(now.getTime() - MATERIAL_KEEP_MIN * 60000));
   const recalled = recall(rest, cue, valence(values), now);
 
@@ -408,6 +473,8 @@ export async function processTurn(
       goals: goalTexts,
       lessons,
       ...memoryMap(memories, now),
+      periphery: periphery(rest, cue, recalled, now),
+      hypotheses: open,
       recalled,
       userName: user.name,
       now,
@@ -511,6 +578,7 @@ export async function processTurn(
         impression: state.impression,
         selfImage: state.selfImage,
         goals: goalTexts,
+        hypotheses: hypotheses.map((h) => h.content),
         known: recalled.map((r) => r.memory.content),
         message,
         reply,
@@ -519,7 +587,7 @@ export async function processTurn(
     .then(parseReflection)
     .catch((err): Reflection => {
       console.error("[brAIn] ο αναστοχασμός απέτυχε:", err);
-      return { expressed: {}, acts: [], memories: [], resolvedGoals: [], impression: "", selfImage: "", search: null };
+      return { expressed: {}, acts: [], memories: [], verdicts: [], resolvedGoals: [], impression: "", selfImage: "", search: null };
     });
 
   // 6. Εγγραφή στη μνήμη — μόνο όσων ξεπερνούν το κατώφλι, με βάρος τη φόρτιση της στιγμής.
@@ -527,7 +595,12 @@ export async function processTurn(
   const storedNow: string[] = [];
   let learned = 0;
   const newLessons: string[] = [];
+  let conjectured = false;
   for (const m of reflection.memories) {
+    if (m.kind === "hypothesis") {
+      if (conjectured) continue;
+      conjectured = true;
+    }
     // Ο επίμονος κρατά τους στόχους του περισσότερο.
     // Όποιος θέλει να εξελιχθεί κρατά πιο γερά τα μαθήματά του.
     const weight =
@@ -563,7 +636,17 @@ export async function processTurn(
     resolved.map((g) => g.id),
   );
   if (resolved.length) values = { ...values, joy: clamp(values.joy + 6) };
-  values = applyProgress(values, { lessons: newLessons.length, learned, resolved: resolved.length });
+  // Υποθέσεις που κρίθηκαν από όσα είπε ο συνομιλητής. Η επιβεβαίωση είναι επίτευγμα· η διάψευση μάθημα.
+  const judged = await settle(db, reflection.verdicts, hypotheses, "από τον συνομιλητή", now);
+  storedNow.push(...judged.notes);
+  if (judged.confirmed) values = { ...values, joy: clamp(values.joy + 5 * judged.confirmed) };
+  // Μια νέα υπόθεση είναι εκκρεμότητα που τραβά: θέλει να την ελέγξει.
+  if (conjectured) values = { ...values, curiosity: clamp(values.curiosity + 4), wonder: clamp(values.wonder + 6) };
+  values = applyProgress(values, {
+    lessons: newLessons.length + judged.refuted,
+    learned,
+    resolved: resolved.length + judged.confirmed,
+  });
 
   // 7. Κάθαρση και αποθήκευση.
   // Το αν ρώτησε δεν το αφήνουμε στην κρίση του μοντέλου: το μετράμε. Κάθε επιπλέον ερώτηση
@@ -613,6 +696,10 @@ export async function processTurn(
       impression,
       selfImage,
       lessons: [...lessons, ...newLessons].slice(-ACTIVE_LESSONS),
+      hypotheses: [
+        ...hypotheses.filter((h, i) => !reflection.verdicts.some((v) => v.n === i + 1)).map((h) => h.content),
+        ...reflection.memories.filter((m) => m.kind === "hypothesis" && storedNow.includes(m.content)).map((m) => m.content),
+      ],
       topics: topicIndex(memories, now).map((t) => `${t.topic} (${t.count}${t.fresh ? ", φρέσκο" : ""})`),
       goals: [
         ...goalTexts.filter((g) => !resolved.some((r) => r.content === g)),
@@ -670,7 +757,7 @@ export async function pulse(
   }
 
   const memories = await repo.listMemories(db, user.id);
-  const { goals, lessons, rest } = splitGoals(memories, now);
+  const { goals, lessons, hypotheses, rest } = splitGoals(memories, now);
   const recalled = recall(rest, [], valence(values), now, 4);
   const spoken = await llm.generateText({
     system:
@@ -681,6 +768,7 @@ export async function pulse(
         goals: goals.map((g) => g.content),
         lessons,
         ...memoryMap(memories, now),
+        hypotheses: hypotheses.map((h) => ({ content: h.content, certainty: h.certainty })),
         recalled,
         userName: user.name,
         now,
@@ -750,7 +838,7 @@ export async function resolveSearch(
   };
 
   const memories = await repo.listMemories(db, user.id);
-  const { goals, lessons, rest } = splitGoals(memories, now);
+  const { goals, lessons, hypotheses, rest } = splitGoals(memories, now);
   // Τι είχε ζητήσει: το τελευταίο του μήνυμα που δεν ήταν σκέτο «ναι».
   const asked =
     [...stored].reverse().find((m) => m.role === "user" && !AFFIRM.test(plain(m.content).trim()))?.content.slice(0, 300) ?? "";
@@ -763,6 +851,7 @@ export async function resolveSearch(
     found: boolean;
     retry: SearchRequest | null;
     memories: Reflection["memories"];
+    verdicts: Verdict[];
   }
 
   /** Μία προσπάθεια: ψάχνει, διαβάζει, και κρίνει αν βρήκε αυτό που ζητήθηκε. */
@@ -798,7 +887,8 @@ export async function resolveSearch(
             now,
             time,
             ...memoryMap(memories, now),
-          }) + readingBlock(SOURCE_LABELS[source], query, asked, mayRetry),
+            hypotheses: hypotheses.map((h) => ({ content: h.content, certainty: h.certainty })),
+          }) + readingBlock(SOURCE_LABELS[source], query, asked, mayRetry, hypotheses.map((h) => h.content)),
         prompt: materialPrompt(material.text),
       })
       .catch((err) => {
@@ -827,6 +917,7 @@ export async function resolveSearch(
       found: raw.found !== false && !invented.length,
       // Δεύτερη προσπάθεια μόνο αν αλλάζει κάτι: άλλες λέξεις ή άλλη πηγή.
       retry: nextQuery && (nextQuery !== query || nextSource !== source) ? { source: nextSource, query: nextQuery } : null,
+      verdicts: invented.length ? [] : parseVerdicts(raw.verdicts),
       memories: invented.length
         ? []
         : parseReflection({ memories: raw.memories }).memories.filter(
@@ -855,6 +946,9 @@ export async function resolveSearch(
     storedNow.push(m.content);
   };
   for (const m of best.memories.slice(0, 3)) await keep(m, "knowledge");
+  // Το υλικό μπορεί να κρίνει υποθέσεις που είχε κάνει: έτσι η εικασία γίνεται γνώση ή μάθημα.
+  const judged = await settle(db, best.verdicts, hypotheses, `από αναζήτηση «${best.query}»`, now);
+  storedNow.push(...judged.notes);
 
   // Έμαθε και πώς να ψάχνει: όταν το πρώτο ερώτημα απέτυχε και το δεύτερο πέτυχε, κρατά το μάθημα.
   // Τα μαθήματα είναι πάντα μπροστά της, άρα το επόμενο ερώτημά της θα είναι καλύτερο.
@@ -866,6 +960,7 @@ export async function resolveSearch(
         gist: "πώς να ψάχνω καλύτερα",
         detail: "",
         topic: "αναζήτηση",
+        certainty: 1,
         importance: 50,
         valence: 0.2,
       },
@@ -876,7 +971,11 @@ export async function resolveSearch(
 
   // Έμαθε: η δίψα χορταίνει, και του το χρωστά που την άφησε.
   values = applyActs(applyExpression(values, {}, learnedCount), ["u_explore"]);
-  values = applyProgress(values, { learned: learnedCount, lessons: first && second?.found ? 1 : 0 });
+  values = applyProgress(values, {
+    learned: learnedCount,
+    lessons: (first && second?.found ? 1 : 0) + judged.refuted,
+    resolved: judged.confirmed,
+  });
   values = { ...values, gratitude: clamp(values.gratitude + 5) };
   await repo.addMessage(
     db,

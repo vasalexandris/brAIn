@@ -137,6 +137,7 @@ const toMemory = (r: any): Memory => ({
   detail: r.detail ?? "",
   topic: r.topic ?? "",
   links: Array.isArray(r.links) ? r.links : [],
+  certainty: r.certainty == null ? 1 : Number(r.certainty),
   importance: Number(r.importance),
   valence: Number(r.valence),
   embedding: r.embedding,
@@ -156,6 +157,7 @@ export interface MemoryInput {
   detail?: string;
   topic?: string;
   links?: string[];
+  certainty?: number;
   importance: number;
   valence: number;
   embedding: number[];
@@ -164,8 +166,8 @@ export interface MemoryInput {
 export async function insertMemory(db: Db, userId: string, m: MemoryInput, now: Date): Promise<void> {
   await db.query(
     `INSERT INTO memories (id, user_id, kind, content, importance, valence, embedding, created_at, last_recalled_at,
-                           gist, detail, topic, links)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::text::jsonb, $8, $8, $9, $10, $11, $12::text::jsonb)`,
+                           gist, detail, topic, links, certainty)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::text::jsonb, $8, $8, $9, $10, $11, $12::text::jsonb, $13)`,
     [
       randomUUID(),
       userId,
@@ -179,6 +181,7 @@ export async function insertMemory(db: Db, userId: string, m: MemoryInput, now: 
       m.detail ?? "",
       m.topic ?? "",
       JSON.stringify(m.links ?? []),
+      m.certainty ?? 1,
     ],
   );
 }
@@ -195,6 +198,24 @@ export async function reviseMemory(db: Db, id: string, m: Omit<MemoryInput, "kin
             topic = COALESCE(NULLIF($9, ''), topic)
       WHERE id = $1`,
     [id, m.content, m.importance, m.valence, JSON.stringify(m.embedding), now.toISOString(), m.gist ?? "", m.detail ?? "", m.topic ?? ""],
+  );
+}
+
+/**
+ * Μια υπόθεση κρίθηκε. Γίνεται γνώση με πλήρη βεβαιότητα — είτε ως αυτό που επιβεβαιώθηκε, είτε ως
+ * το λάθος από το οποίο έμαθε — και κρατά στις λεπτομέρειές της το πώς κρίθηκε.
+ */
+export async function settleHypothesis(
+  db: Db,
+  id: string,
+  m: { content: string; gist: string; detail: string },
+  now: Date,
+): Promise<void> {
+  await db.query(
+    `UPDATE memories SET kind = 'knowledge', certainty = 1, content = $2, gist = $3, detail = $4,
+            recall_count = recall_count + 1, last_recalled_at = $5
+      WHERE id = $1 AND kind = 'hypothesis'`,
+    [id, m.content, m.gist, m.detail, now.toISOString()],
   );
 }
 

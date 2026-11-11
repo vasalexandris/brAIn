@@ -15,6 +15,7 @@ interface Debug {
   goals: string[];
   lessons?: string[];
   topics?: string[];
+  hypotheses?: string[];
 }
 interface Proposal {
   id: string;
@@ -263,6 +264,8 @@ export function Chat({ initialMessages, initialValues, initialImpression, initia
           {debug.goals.length ? <ul>{debug.goals.map((r, i) => <li key={i}>{r}</li>)}</ul> : <p>—</p>}
           <h4>Τι έμαθε για τον εαυτό της</h4>
           {debug.lessons?.length ? <ul>{debug.lessons.map((r, i) => <li key={i}>{r}</li>)}</ul> : <p>—</p>}
+          <h4>Οι υποθέσεις της (ανεπιβεβαίωτες)</h4>
+          {debug.hypotheses?.length ? <ul>{debug.hypotheses.map((r, i) => <li key={i}>{r}</li>)}</ul> : <p>—</p>}
           <h4>Τι ξέρει ότι ξέρει</h4>
           <p>{debug.topics?.length ? debug.topics.join(" · ") : "—"}</p>
           <h4>Τι της ήρθε στο μυαλό</h4>

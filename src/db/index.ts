@@ -83,6 +83,8 @@ ALTER TABLE memories ADD COLUMN IF NOT EXISTS gist text NOT NULL DEFAULT '';
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS detail text NOT NULL DEFAULT '';
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS topic text NOT NULL DEFAULT '';
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS links jsonb NOT NULL DEFAULT '[]';
+-- Βεβαιότητα 0–1: κάτω από 1 μόνο οι υποθέσεις, ώσπου να επαληθευτούν.
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS certainty real NOT NULL DEFAULT 1;
 `;
 
 /** Ενσωματωμένη βάση. `dataDir` κενό = μόνο στη μνήμη (για tests). */
