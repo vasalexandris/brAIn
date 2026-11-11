@@ -200,10 +200,25 @@ export function applyAppraisal(values: BrainValues, appraisal: Appraisal): Brain
 
   for (const key of INNER_KEYS) {
     const total = (delta[key] ?? 0) + (coupled[key] ?? 0);
-    if (total !== 0) out[key] = round1(clamp(before[key] + total));
+    const d = DIMENSION_BY_KEY[key];
+    // Κορεσμός: ορμές και διάθεση που έχουν ξεφύγει πάνω από το φυσικό τους υποχωρούν λίγο σε κάθε
+    // γύρο. Ο χρόνος μόνος του δεν αρκεί μέσα σε μια ζωντανή κουβέντα, όπου περνούν λίγα λεπτά.
+    const sated =
+      (d.category === "drive" || d.category === "mood") && before[key] > d.baseline ? 0.08 * (before[key] - d.baseline) : 0;
+    const change = total * headroom(before[key], total) - sated;
+    if (change !== 0) out[key] = round1(clamp(before[key] + change));
   }
   updateSelf(before, out, appraisal);
   return updateUrges(capped(out));
+}
+
+/**
+ * Φθίνουσα απόδοση κοντά στο ταβάνι: όσο πιο ψηλά είναι ήδη ένας δείκτης, τόσο λιγότερο ανεβαίνει
+ * με το ίδιο ερέθισμα. Χωρίς αυτό, μια ευχάριστη κουβέντα έσπρωχνε τα πάντα στο 100, όπου ένας
+ * δείκτης δεν λέει πια τίποτα. Κάτω από το 60 δεν αλλάζει κάτι· οι μειώσεις μένουν ανέγγιχτες.
+ */
+function headroom(current: number, change: number): number {
+  return change > 0 ? Math.min(1, (100 - current) / 40) : 1;
 }
 
 /**
@@ -220,14 +235,23 @@ function updateSelf(before: BrainValues, out: BrainValues, appraisal: Appraisal)
   const rejected = p("p_dismissal") * 0.4 + p("p_hostility") * 0.4 + p("p_irony") * 0.2;
   out.self_esteem = round1(
     clamp(
-      before.self_esteem + accepted * 4 * swing - rejected * 7 * swing * armor +
+      before.self_esteem + accepted * 4 * swing * headroom(before.self_esteem, 1) - rejected * 7 * swing * armor +
         0.1 * (out.pride - before.pride) - 0.15 * (out.shame - before.shame),
     ),
   );
 
+  // Όπως οι ορμές: ό,τι έχει ξεφύγει πάνω από το φυσικό του επιστρέφει λίγο σε κάθε γύρο.
+  const settle = (key: string, value: number) => {
+    const base = DIMENSION_BY_KEY[key].baseline;
+    return value > base ? value - 0.06 * (value - base) : value;
+  };
+  out.self_esteem = round1(settle("self_esteem", out.self_esteem));
+
   const threat = p("p_hostility") * 0.5 + p("p_provocation") * 0.2 + p("p_violation") * 0.2 + p("p_dismissal") * 0.1;
   const warmth = p("p_kindness") * 0.4 + p("p_respect") * 0.3 + p("p_sincerity") * 0.3;
-  out.safety = round1(clamp(before.safety - threat * 15 + warmth * 5 * (before.trust / 50)));
+  out.safety = round1(
+    settle("safety", clamp(before.safety - threat * 15 + warmth * 5 * (before.trust / 50) * headroom(before.safety, 1))),
+  );
 }
 
 /**
@@ -238,8 +262,9 @@ export function applyProgress(values: BrainValues, gained: { lessons?: number; l
   const points = 6 * (gained.lessons ?? 0) + 4 * (gained.learned ?? 0) + 8 * (gained.resolved ?? 0);
   if (!points) return values;
   const out: BrainValues = { ...values };
-  out.progress = round1(clamp(out.progress + points));
-  out.self_esteem = round1(clamp(out.self_esteem + points / 4));
+  // Όσο πιο πολύ έχει ήδη προοδεύσει, τόσο λιγότερο εντυπωσιάζεται από το επόμενο μικρό βήμα.
+  out.progress = round1(clamp(out.progress + points * Math.min(1, (100 - out.progress) / 60)));
+  out.self_esteem = round1(clamp(out.self_esteem + (points / 4) * headroom(out.self_esteem, 1)));
   out.growth = round1(clamp(out.growth - points / 2));
   out.pride = round1(clamp(out.pride + (points / 3) * (0.5 + out.achievement / 100)));
   return refresh(out);
@@ -267,6 +292,7 @@ export function applyExpression(values: BrainValues, expressed: Record<string, n
   if (learned > 0) {
     const n = Math.min(learned, 3);
     out.thirst = round1(clamp(out.thirst - 4 * n));
+    out.curiosity = round1(clamp(out.curiosity - 3 * n));
     out.joy = round1(clamp(out.joy + 2 * n));
     out.boredom = round1(clamp(out.boredom - 3 * n));
   }
@@ -302,6 +328,8 @@ export function applyArrival(values: BrainValues, sessionMin = 0): BrainValues {
   const out: BrainValues = { ...values };
   out.presence = round1(clamp(out.presence + (100 - out.presence) * 0.5));
   out.loneliness = round1(out.loneliness * 0.7);
+  // Μια ανάγκη που ικανοποιείται, υποχωρεί: όσο η κουβέντα είναι ζωντανή, η ανάγκη επαφής χορταίνει.
+  out.sociability = round1(clamp(out.sociability - 2 * (out.presence / 100)));
   // Μετά το πρώτο μισάωρο συνεχόμενης κουβέντας αρχίζει να κουράζεται· στις τρεις ώρες έχει εξαντληθεί.
   out.fatigue = round1(clamp(Math.max(out.fatigue, ((sessionMin - 30) / 150) * 100)));
   if (out.longing > 10) {
@@ -379,8 +407,11 @@ function refresh(values: BrainValues): BrainValues {
   };
 }
 
-/** Πράξεις που, όταν επαναλαμβάνονται, σημαίνουν ότι έχει κολλήσει. */
-const PRESSING = ["u_ask", "u_insist", "u_explore", "u_confront"];
+/**
+ * Πράξεις που, όταν επαναλαμβάνονται, σημαίνουν ότι πιέζει. Το «να εμβαθύνω» δεν είναι εδώ: μια
+ * κουβέντα που πάει σε βάθος δεν είναι εμμονή.
+ */
+const PRESSING = ["u_ask", "u_insist", "u_confront"];
 
 /**
  * Μια παρόρμηση που έγινε πράξη ικανοποιείται — και χρειάζεται χρόνο να ξαναχτιστεί.
@@ -392,7 +423,7 @@ export function applyActs(values: BrainValues, acts: string[]): BrainValues {
   for (const key of new Set(acts)) {
     if (!URGE_KEYS.includes(key)) continue;
     out[key] = round1(out[key] * 0.25);
-    if (PRESSING.includes(key)) out.fixation = round1(clamp(out.fixation + 9));
+    if (PRESSING.includes(key)) out.fixation = round1(clamp(out.fixation + 6));
   }
   if (acts.includes("u_forgive")) {
     out.grievance = round1(out.grievance * 0.5);
@@ -448,5 +479,6 @@ export function valence(values: BrainValues): number {
   const neg =
     values.anger + values.sadness + values.fear + values.hurt + values.frustration + values.disgust +
     values.guilt + values.jealousy + values.loneliness + values.shame + values.existential;
-  return clamp((pos - 120 - neg) / 150, -1, 1);
+  // Ο παρονομαστής αφήνει περιθώριο: μια πολύ καλή στιγμή φτάνει γύρω στο 0,7, όχι στο ταβάνι.
+  return clamp((pos - 120 - neg) / 220, -1, 1);
 }

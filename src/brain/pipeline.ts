@@ -259,7 +259,12 @@ interface Reflection {
 
 type SearchRequest = { source: Source; query: string };
 
-const MARKER = /\[\s*ΨΑΞΕ\s+(ειδήσεις|wikipedia|web|διαδίκτυο)\s*(?::\s*([^\]]*))?\]/giu;
+const MARKER =
+  /\[\s*(?:ΨΑΞΕ\s+(ειδήσεις|wikipedia|web|διαδίκτυο)\s*(?::\s*([^\]]*))?|ΑΝΟΙΞΕ\s*:?\s*(https?:\/\/[^\s\]]+))\s*\]/giu;
+/** Διευθύνσεις ιστοσελίδων μέσα σε κείμενο. */
+const URL_RE = /https?:\/\/[^\s<>"'\])]+/gi;
+/** Ο συνομιλητής ζητά να διαβαστεί κάτι. */
+const READ_INTENT = /διαβασ|ανοιξ|κοιτα|δες |ριξε μια ματια|τι λεει|τι γραφει/;
 
 /**
  * Η απάντηση μπορεί να κλείνει με μια γραμμή-αίτημα, π.χ. «[ΨΑΞΕ wikipedia: κβάζαρ]».
@@ -269,9 +274,10 @@ const MARKER = /\[\s*ΨΑΞΕ\s+(ειδήσεις|wikipedia|web|διαδίκτυ
 export function extractSearchMarker(reply: string): { text: string; request: SearchRequest | null } {
   let request: SearchRequest | null = null;
   const text = reply
-    .replace(MARKER, (_, kind: string, topic: string | undefined) => {
+    .replace(MARKER, (_, kind: string | undefined, topic: string | undefined, address: string | undefined) => {
       const query = (topic ?? "").trim().slice(0, 120);
-      if (!request) {
+      if (!request && address) request = { source: "page", query: address };
+      if (!request && kind) {
         const k = kind.toLowerCase();
         if (k === "wikipedia") {
           if (query) request = { source: "wikipedia", query };
@@ -496,12 +502,24 @@ export async function processTurn(
       request: marked.request ?? { source: "web", query: message.trim().slice(0, 120) },
     };
   }
+  // Ιστοσελίδες: ανοίγει μόνο διεύθυνση που έχει πραγματικά δει — στα λόγια του συνομιλητή, στην
+  // κουβέντα ή σε υλικό που διάβασε. Μια διεύθυνση που "θυμήθηκε" το μοντέλο είναι επινόηση.
+  if (marked.request?.source === "page" && !seen.includes(marked.request.query)) {
+    console.warn("[brAIn] αγνοήθηκε διεύθυνση που δεν έχει δει:", marked.request.query);
+    marked = { text: marked.text, request: null };
+  }
+  // Αν ο συνομιλητής έδωσε διεύθυνση και ζήτησε να τη δει, αυτό είναι ήδη εντολή.
+  const given = message.match(URL_RE)?.[0]?.replace(/[.,;!?]+$/, "");
+  const asksToRead = Boolean(given) && (READ_INTENT.test(plain(message)) || message.trim() === given);
+  if (asksToRead && given && marked.request?.source !== "page") marked = { text: marked.text, request: { source: "page", query: given } };
+
   // Όταν της είπε ρητά να ψάξει — ή απάντησε «ναι» στη δική της προσφορά να ψάξει — το αίτημά του
   // είναι ήδη η άδεια: θα ψάξει αμέσως, χωρίς κάρτα.
   const lastOwn = [...stored].reverse().find((m) => m.role === "assistant");
   const offered = lastOwn ? SAYS_SEARCHING.test(plain(lastOwn.content)) : false;
   const commanded =
-    !NO_SEARCH.test(said) && (SEARCH_INTENT.test(said) || (offered && said.length <= 80 && AFFIRM.test(said)));
+    !NO_SEARCH.test(said) &&
+    (asksToRead || SEARCH_INTENT.test(said) || (offered && said.length <= 80 && AFFIRM.test(said)));
   const userAsked = commanded || NEWS_INTENT.test(said);
 
   /**
@@ -596,10 +614,16 @@ export async function processTurn(
   let learned = 0;
   const newLessons: string[] = [];
   let conjectured = false;
+  let aboutSelf = false;
   for (const m of reflection.memories) {
     if (m.kind === "hypothesis") {
       if (conjectured) continue;
       conjectured = true;
+    }
+    // Το πολύ μία ανάμνηση για τον εαυτό της ανά ανταλλαγή: αλλιώς γεμίζει τη μνήμη με τον εαυτό της.
+    if (m.kind === "self") {
+      if (aboutSelf) continue;
+      aboutSelf = true;
     }
     // Ο επίμονος κρατά τους στόχους του περισσότερο.
     // Όποιος θέλει να εξελιχθεί κρατά πιο γερά τα μαθήματά του.

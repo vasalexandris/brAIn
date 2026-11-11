@@ -240,7 +240,7 @@ export async function reinforceMemories(db: Db, items: { id: string; lastRecalle
 
 export interface Search {
   id: string;
-  source: "wikipedia" | "news" | "headlines" | "web";
+  source: "wikipedia" | "news" | "headlines" | "web" | "page";
   query: string;
   status: "pending" | "done" | "declined" | "failed";
   createdAt: Date;
