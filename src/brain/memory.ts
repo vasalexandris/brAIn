@@ -6,7 +6,7 @@
  * χρόνο· όσο πιο σημαντική και όσο πιο συχνά ανακαλείται, τόσο πιο αργά.
  */
 
-export type MemoryKind = "user_fact" | "episode" | "knowledge" | "opinion" | "self" | "goal" | "lesson";
+export type MemoryKind = "user_fact" | "episode" | "knowledge" | "opinion" | "self" | "goal" | "lesson" | "hypothesis";
 
 export const MEMORY_KIND_LABELS: Record<MemoryKind, string> = {
   user_fact: "για τον συνομιλητή",
@@ -16,6 +16,7 @@ export const MEMORY_KIND_LABELS: Record<MemoryKind, string> = {
   self: "για τον εαυτό μου",
   goal: "κάτι που θέλω",
   lesson: "μάθημα για μένα",
+  hypothesis: "υπόθεσή μου, ανεπιβεβαίωτη",
 };
 
 export interface Memory {
@@ -31,6 +32,8 @@ export interface Memory {
   topic: string;
   /** Με ποιες άλλες αναμνήσεις συνδέεται. */
   links: string[];
+  /** Πόσο σίγουρη είναι (0–1). Κάτω από 1 μόνο οι υποθέσεις, ώσπου να επαληθευτούν. */
+  certainty: number;
   importance: number; // 0–100
   valence: number; // −1…+1, το συναίσθημα με το οποίο δέθηκε
   embedding: number[];
@@ -103,6 +106,27 @@ export function rehearse(m: Pick<Memory, "importance" | "recallCount" | "lastRec
   // Η επόμενη ανάκληση μετρά με ένα recall παραπάνω, άρα με μεγαλύτερη σταθερότητα.
   const days = stabilityDays(m.importance, m.recallCount + 1) * Math.log2(1 / target);
   return new Date(now.getTime() - days * DAY_MS);
+}
+
+/**
+ * Το "πίσω μέρος του μυαλού": πέρα από όσα ανακλήθηκαν σε βάθος, οι εικόνες από μερικές ακόμη
+ * σχετικές αναμνήσεις. Λίγες λέξεις η καθεμία, άρα πολλή "γεύση" γνώσης με ελάχιστο κόστος —
+ * «αυτό το ξέρω», «αυτό είναι επικίνδυνο» — χωρίς να φορτώνονται οι λεπτομέρειες.
+ */
+export function periphery(memories: Memory[], cue: number[], focused: Recalled[], now: Date, limit = 10): string[] {
+  const out: Memory[] = [];
+  const ranked = memories
+    .filter((m) => strength(m, now) >= FORGOTTEN_BELOW && !focused.some((f) => f.memory.id === m.id))
+    .map((memory) => ({ memory, sim: cosine(cue, memory.embedding) }))
+    .sort((a, b) => b.sim - a.sim);
+  for (const { memory } of ranked) {
+    if (out.length >= limit) break;
+    const echo = [...focused.map((f) => f.memory), ...out].some(
+      (kept) => cosine(kept.embedding, memory.embedding) >= SAME_MEMORY_SIMILARITY,
+    );
+    if (!echo) out.push(memory);
+  }
+  return out.map(gistOf);
 }
 
 /** Τα θέματα για τα οποία "ξέρει ότι ξέρει κάτι", με τα πιο φρέσκα πρώτα. */

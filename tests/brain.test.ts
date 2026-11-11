@@ -5,6 +5,7 @@ import {
   depthOf,
   encodeImportance,
   gistOf,
+  periphery,
   recall,
   rehearse,
   strength,
@@ -92,6 +93,7 @@ describe("μνήμη", () => {
     detail: "",
     topic: "",
     links: [],
+    certainty: 1,
     importance: 50,
     valence: 0,
     embedding: [1, 0],
@@ -176,6 +178,24 @@ describe("μνήμη", () => {
     expect(shelves).toEqual([
       { topic: "αθλητικά", count: 2, fresh: true },
       { topic: "επιστήμη", count: 1, fresh: false },
+    ]);
+  });
+
+  it("στο πίσω μέρος του μυαλού: εικόνες από άλλες σχετικές αναμνήσεις, χωρίς επαναλήψεις και χωρίς τα ξεχασμένα", () => {
+    const focus = mem({ content: "ηλεκτρισμός", gist: "πώς δουλεύει το ρεύμα", embedding: [1, 0, 0] });
+    const all = [
+      focus,
+      mem({ gist: "το ρεύμα χτυπάει — επικίνδυνο", embedding: [0.8, 0.6, 0] }),
+      mem({ gist: "τάση, ένταση, ισχύς", embedding: [0.5, 0, 0.866] }),
+      mem({ gist: "ίδιο με την τάση", embedding: [0.5, 0, 0.87] }),
+      mem({ gist: "άσχετο αλλά ζωντανό", embedding: [0, 0.6, -0.8] }),
+      mem({ gist: "ξεχασμένο", embedding: [0.95, 0.1, 0], importance: 16, lastRecalledAt: daysAgo(200) }),
+    ];
+    const focused = recall([focus], [1, 0, 0], 0, now);
+    expect(periphery(all, [1, 0, 0], focused, now, 3)).toEqual([
+      "το ρεύμα χτυπάει — επικίνδυνο",
+      "τάση, ένταση, ισχύς",
+      "άσχετο αλλά ζωντανό",
     ]);
   });
 

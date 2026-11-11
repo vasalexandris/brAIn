@@ -712,6 +712,90 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     expect(calls).toHaveLength(1);
   });
 
+  it("συνδυάζει γνώσεις σε υπόθεση, που μένει χωριστά από τη γνώση ώσπου να επαληθευτεί απ' έξω", async () => {
+    const u = await createUser(db, { email: "hyp@x.gr", name: "Βασίλης", passwordHash: "x" });
+    let clock = new Date("2026-11-12T09:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    let system = "";
+    let reflectPrompt = "";
+    let reflection: Record<string, unknown> = {};
+    const model: LlmProvider = {
+      name: "model",
+      embed: llm.embed.bind(llm),
+      generateText: async (req) => {
+        system = req.system;
+        return "Εντάξει.";
+      },
+      generateJson: async (req) => {
+        if (req.prompt.includes("<υλικό>")) return reading;
+        if (!req.prompt.includes("<απάντηση>")) return { perception: {}, impulses: {} };
+        reflectPrompt = req.prompt;
+        return reflection;
+      },
+    };
+    let reading: Record<string, unknown> = {};
+    const hyp = (content: string, certainty: number) => ({
+      kind: "hypothesis",
+      topic: "ο συνομιλητής",
+      gist: "ίσως δουλεύει βράδυ",
+      content,
+      detail: "Μου γράφει πάντα μετά τα μεσάνυχτα και λέει ότι είναι κουρασμένος.",
+      certainty,
+      importance: 60,
+      valence: 0,
+    });
+
+    // Γεννιέται μία υπόθεση (όχι δύο), και ποτέ πιο σίγουρη από 60%.
+    reflection = { memories: [hyp("Υποθέτω ότι ο Βασίλης δουλεύει βραδινή βάρδια.", 95), hyp("Και δεύτερη υπόθεση.", 50)] };
+    const born = await processTurn({ db, llm: model, now: at(1) }, u, "Πάλι ξενύχτησα, είμαι πτώμα.");
+    expect(born.debug.hypotheses).toEqual(["Υποθέτω ότι ο Βασίλης δουλεύει βραδινή βάρδια."]);
+    const stored = (await listMemories(db, u.id)).filter((m) => m.kind === "hypothesis");
+    expect(stored).toHaveLength(1);
+    expect(stored[0].certainty).toBeCloseTo(0.6);
+
+    // Στο επόμενο μήνυμα την έχει μπροστά της ως υπόθεση, όχι ανάμεσα σε όσα «ξέρει».
+    reflection = {};
+    const next = await processTurn({ db, llm: model, now: at(1) }, u, "Τι λες για τη δουλειά μου και τη βραδινή βάρδια;");
+    expect(system).toContain("- (βεβαιότητα 60%) Υποθέτω ότι ο Βασίλης δουλεύει βραδινή βάρδια.");
+    expect(next.debug.recalled.join(" ")).not.toContain("βραδινή βάρδια");
+    expect(reflectPrompt).toContain("1. Υποθέτω ότι ο Βασίλης δουλεύει βραδινή βάρδια.");
+
+    // Ετυμηγορία χωρίς τεκμήριο αγνοείται: δεν επιβεβαιώνει τον εαυτό της.
+    reflection = { verdicts: [{ n: 1, verdict: "confirmed", evidence: "" }] };
+    await processTurn({ db, llm: model, now: at(1) }, u, "Χμ.");
+    expect((await listMemories(db, u.id)).filter((m) => m.kind === "hypothesis")).toHaveLength(1);
+
+    // Ο συνομιλητής τη διαψεύδει: γίνεται γνώση του λάθους της, με το τεκμήριο στις λεπτομέρειες.
+    reflection = { verdicts: [{ n: 1, verdict: "refuted", evidence: "Είπε ότι δουλεύει πρωί και απλώς δεν κοιμάται καλά." }] };
+    const before = (await loadBrainState(db, u.id)).values;
+    const refuted = await processTurn({ db, llm: model, now: at(1) }, u, "Όχι, πρωί δουλεύω. Απλώς δεν κοιμάμαι καλά.");
+    const all = await listMemories(db, u.id);
+    expect(all.filter((m) => m.kind === "hypothesis")).toHaveLength(0);
+    const lesson = all.find((m) => m.content.includes("Αποδείχθηκε λάθος"))!;
+    expect(lesson).toMatchObject({ kind: "knowledge", certainty: 1 });
+    expect(lesson.detail).toContain("Διαψεύστηκε (από τον συνομιλητή): Είπε ότι δουλεύει πρωί");
+    expect(refuted.debug.hypotheses).toEqual([]);
+    expect(refuted.values.progress).toBeGreaterThan(before.progress);
+
+    // Νέα υπόθεση, που αυτή τη φορά επιβεβαιώνεται από υλικό αναζήτησης.
+    reflection = { memories: [hyp("Υποθέτω ότι η αϋπνία σχετίζεται με το φως της οθόνης.", 40)] };
+    await processTurn({ db, llm: model, now: at(1) }, u, "Κοιτάζω το κινητό ως αργά.");
+    reflection = {};
+    reading = {
+      found: true,
+      message: "Διάβασα ότι το μπλε φως καθυστερεί τον ύπνο.",
+      verdicts: [{ n: 1, verdict: "confirmed", evidence: "Το μπλε φως των οθονών καταστέλλει τη μελατονίνη." }],
+      memories: [],
+    };
+    const lookup = async () => ({ titles: ["Ύπνος"], text: "## Ύπνος\nΤο μπλε φως των οθονών καταστέλλει τη μελατονίνη." });
+    const read = await processTurn({ db, llm: model, lookup, now: at(15) }, u, "Ψάξε αν το φως της οθόνης πειράζει τον ύπνο");
+    expect(read.extra).toContain("μπλε φως");
+    const confirmed = (await listMemories(db, u.id)).find((m) => m.content.includes("φως της οθόνης"))!;
+    expect(confirmed).toMatchObject({ kind: "knowledge", certainty: 1, content: "Υποθέτω ότι η αϋπνία σχετίζεται με το φως της οθόνης." });
+    expect(confirmed.detail).toContain("Επιβεβαιώθηκε (από αναζήτηση");
+    expect(read.debug.stored.join(" ")).toContain("Επιβεβαίωσα:");
+  });
+
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {
     const broken: LlmProvider = {
       name: "broken",
