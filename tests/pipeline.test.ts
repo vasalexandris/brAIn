@@ -8,7 +8,7 @@ import {
   resolveSearch,
 } from "@/brain/pipeline";
 import { createPgliteDb, type Db } from "@/db";
-import { createUser, listMemories, loadBrainState, recentMessages } from "@/db/repo";
+import { createUser, listMemories, loadBrainState, recentMessages, setAutoNews } from "@/db/repo";
 import { MockProvider } from "@/llm/mock";
 import type { LlmProvider } from "@/llm/types";
 
@@ -841,6 +841,71 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     expect(fromMaterial.search).toMatchObject({ source: "page", sourceLabel: "ιστοσελίδα", query: "https://www.ertnews.gr/arthro-1/" });
     await resolveSearch({ db, llm: model, lookup, now: at(1) }, u, fromMaterial.search!.id, true);
     expect(calls[calls.length - 1]).toBe("page:https://www.ertnews.gr/arthro-1/");
+  });
+
+  it("με μόνιμη άδεια διαβάζει τους τίτλους μία φορά τη μέρα, μόνη της, και το ξέρει", async () => {
+    const u = await createUser(db, { email: "daily@x.gr", name: "Βασίλης", passwordHash: "x" });
+    let clock = new Date("2026-11-12T06:00:00Z").getTime(); // 08:00 στην Ελλάδα
+    const at = (min: number) => new Date((clock += min * 60000));
+    const calls: string[] = [];
+    const lookup = async (source: string, query: string) => {
+      calls.push(`${source}:${query}`);
+      return { titles: ["Τίτλος"], text: "## Τίτλος\nΠερίληψη της ημέρας." };
+    };
+    let system = "";
+    let reading = "";
+    const model: LlmProvider = {
+      name: "model",
+      embed: llm.embed.bind(llm),
+      generateText: async (req) => {
+        system = req.system;
+        return "Εντάξει.";
+      },
+      generateJson: async (req) => {
+        if (!req.prompt.includes("<υλικό>")) return { perception: {}, impulses: {} };
+        reading = req.system;
+        return { found: true, message: "Διάβασα τα σημερινά.", retry: { source: "web", query: "κάτι άλλο" }, memories: [] };
+      },
+    };
+
+    await processTurn({ db, llm: model, lookup, now: at(1) }, u, "Καλημέρα");
+    // Χωρίς άδεια: τίποτα.
+    expect((await pulse({ db, llm: model, lookup, now: at(1) }, u)).message).toBeNull();
+    expect(calls).toEqual([]);
+    expect(system).not.toContain("ΜΟΝΙΜΗ άδεια");
+
+    // Η άδεια δίνεται· η κατάσταση του εγκεφάλου δεν πειράζεται.
+    const before = await loadBrainState(db, u.id);
+    await setAutoNews(db, u.id, true, at(0));
+    const after = await loadBrainState(db, u.id);
+    expect(after.autoNews).toBe(true);
+    expect(after.values).toEqual(before.values);
+    expect(after.turnCount).toBe(before.turnCount);
+
+    const first = await pulse({ db, llm: model, lookup, now: at(1) }, u);
+    expect(first.message).toBe("Διάβασα τα σημερινά.");
+    expect(calls).toEqual(["headlines:σημερινοί τίτλοι"]);
+    expect(reading).toContain("καθημερινή σου ανάγνωση");
+    expect(reading).not.toContain("Το τελευταίο που σου είπε");
+    expect(reading).not.toContain('"retry"');
+
+    // Την ίδια μέρα δεν ξαναδιαβάζει, ούτε μετά από κουβέντα· και η άδεια επιβιώνει από την αποθήκευση της κατάστασης.
+    await processTurn({ db, llm: model, lookup, now: at(30) }, u, "Τι λένε τα νέα;");
+    expect(system).toContain("ΜΟΝΙΜΗ άδεια");
+    await db.query(`UPDATE searches SET status = 'declined' WHERE user_id = $1 AND status = 'pending'`, [u.id]);
+    await pulse({ db, llm: model, lookup, now: at(240) }, u);
+    expect(calls.filter((c) => c.startsWith("headlines"))).toHaveLength(1);
+    expect((await loadBrainState(db, u.id)).autoNews).toBe(true);
+
+    // Την επόμενη μέρα, ξανά μία φορά.
+    await pulse({ db, llm: model, lookup, now: at(24 * 60) }, u);
+    await pulse({ db, llm: model, lookup, now: at(5) }, u);
+    expect(calls.filter((c) => c.startsWith("headlines"))).toHaveLength(2);
+
+    // Η άδεια ανακαλείται.
+    await setAutoNews(db, u.id, false, at(0));
+    await pulse({ db, llm: model, lookup, now: at(24 * 60) }, u);
+    expect(calls.filter((c) => c.startsWith("headlines"))).toHaveLength(2);
   });
 
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {

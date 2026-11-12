@@ -479,6 +479,7 @@ export async function processTurn(
       goals: goalTexts,
       lessons,
       ...memoryMap(memories, now),
+      autoNews: state.autoNews,
       periphery: periphery(rest, cue, recalled, now),
       hypotheses: open,
       recalled,
@@ -733,6 +734,9 @@ export async function processTurn(
   };
 }
 
+/** Η ημερομηνία στην Ελλάδα, για το «μία φορά τη μέρα». */
+const athensDay = (d: Date) => d.toLocaleDateString("en-CA", { timeZone: "Europe/Athens" });
+
 export interface PulseResult {
   /** Το μήνυμα που έστειλε με δική της πρωτοβουλία, αν έστειλε. */
   message: string | null;
@@ -747,7 +751,7 @@ export interface PulseResult {
  * της στη σιωπή — τότε παίρνει η ίδια τον λόγο.
  */
 export async function pulse(
-  deps: { db: Db; llm: LlmProvider; now?: Date },
+  deps: { db: Db; llm: LlmProvider; now?: Date; lookup?: Lookup },
   user: { id: string; name: string },
 ): Promise<PulseResult> {
   const { db, llm } = deps;
@@ -760,6 +764,23 @@ export async function pulse(
   ]);
   // Δεν ξεκινά κουβέντα με κάποιον που δεν της έχει μιλήσει ποτέ.
   if (!state.updatedAt || !stored.length) return idle;
+
+  // Καθημερινή ανάγνωση: με μόνιμη άδεια, διαβάζει τους τίτλους της ημέρας μία φορά τη μέρα και
+  // λέει τι της τράβηξε την προσοχή. Μετρά στο ημερήσιο όριο αναζητήσεων όπως κάθε άλλη.
+  if (state.autoNews) {
+    const last = await repo.lastDone(db, user.id, "headlines");
+    const pending = await repo.latestSearch(db, user.id);
+    const due = !last || athensDay(last.createdAt) !== athensDay(now);
+    if (
+      due &&
+      pending?.status !== "pending" &&
+      (await repo.countSearchesSince(db, user.id, dayAgo(now))) < DAILY_SEARCH_LIMIT
+    ) {
+      const search = await repo.createSearch(db, user.id, "headlines", HEADLINES_QUERY, now);
+      const read = await resolveSearch(deps, user, search.id, true, true);
+      if (read) return { message: read.message, values: read.values, nextInSec: 120 };
+    }
+  }
 
   const time = senseTime(stored, now);
   const quietMin = minutesBetween(stored[stored.length - 1].createdAt, now);
@@ -792,6 +813,7 @@ export async function pulse(
         goals: goals.map((g) => g.content),
         lessons,
         ...memoryMap(memories, now),
+      autoNews: state.autoNews,
         hypotheses: hypotheses.map((h) => ({ content: h.content, certainty: h.certainty })),
         recalled,
         userName: user.name,
@@ -833,6 +855,8 @@ export async function resolveSearch(
   user: { id: string; name: string },
   searchId: string,
   approve: boolean,
+  /** Η καθημερινή ανάγνωση με μόνιμη άδεια: κανείς δεν τη ζήτησε τώρα. */
+  unprompted = false,
 ): Promise<SearchResult | null> {
   const { db, llm } = deps;
   const now = deps.now ?? new Date();
@@ -864,8 +888,9 @@ export async function resolveSearch(
   const memories = await repo.listMemories(db, user.id);
   const { goals, lessons, hypotheses, rest } = splitGoals(memories, now);
   // Τι είχε ζητήσει: το τελευταίο του μήνυμα που δεν ήταν σκέτο «ναι».
-  const asked =
-    [...stored].reverse().find((m) => m.role === "user" && !AFFIRM.test(plain(m.content).trim()))?.content.slice(0, 300) ?? "";
+  const asked = unprompted
+    ? ""
+    : ([...stored].reverse().find((m) => m.role === "user" && !AFFIRM.test(plain(m.content).trim()))?.content.slice(0, 300) ?? "");
 
   interface Attempt {
     source: Source;
@@ -911,8 +936,9 @@ export async function resolveSearch(
             now,
             time,
             ...memoryMap(memories, now),
+      autoNews: state.autoNews,
             hypotheses: hypotheses.map((h) => ({ content: h.content, certainty: h.certainty })),
-          }) + readingBlock(SOURCE_LABELS[source], query, asked, mayRetry, hypotheses.map((h) => h.content)),
+          }) + readingBlock(SOURCE_LABELS[source], query, asked, mayRetry && !unprompted, hypotheses.map((h) => h.content), unprompted),
         prompt: materialPrompt(material.text),
       })
       .catch((err) => {

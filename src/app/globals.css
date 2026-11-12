@@ -105,3 +105,7 @@ button, input, textarea { font: inherit; color: inherit; }
 .proposal strong { color: var(--text); }
 .proposal div { display: flex; gap: 8px; }
 .proposal .btn { padding: 6px 14px; font-size: 14px; }
+
+/* Άδειες */
+.permit { display: flex; gap: 8px; align-items: flex-start; color: var(--text); cursor: pointer; margin-bottom: 4px; }
+.permit input { margin-top: 3px; accent-color: var(--accent); }
