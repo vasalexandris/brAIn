@@ -28,6 +28,7 @@ export default async function ChatPage() {
       initialImpression={state.impression}
       initialSelfImage={state.selfImage}
       build={BUILD}
+      initialAutoNews={state.autoNews === true}
       initialSearch={search?.status === "pending" ? toProposal(search) : null}
       dimensions={DIMENSIONS.map(({ key, label, category }) => ({ key, label, category }))}
       categories={CATEGORY_LABELS}

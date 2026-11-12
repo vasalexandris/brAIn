@@ -25,6 +25,7 @@ interface Proposal {
 interface Props {
   /** Η έκδοση του κώδικα με την οποία φορτώθηκε η σελίδα. */
   build: string;
+  initialAutoNews: boolean;
   initialSearch: Proposal | null;
   initialMessages: Msg[];
   initialValues: Record<string, number>;
@@ -35,7 +36,7 @@ interface Props {
   admin: boolean;
 }
 
-export function Chat({ initialMessages, initialValues, initialImpression, initialSelfImage, initialSearch, build, dimensions, categories, admin }: Props) {
+export function Chat({ initialMessages, initialValues, initialImpression, initialSelfImage, initialSearch, build, initialAutoNews, dimensions, categories, admin }: Props) {
   const [messages, setMessages] = useState(initialMessages);
   const [values, setValues] = useState(initialValues);
   const [debug, setDebug] = useState<Debug>({
@@ -51,6 +52,23 @@ export function Chat({ initialMessages, initialValues, initialImpression, initia
   const [error, setError] = useState("");
   const [inspect, setInspect] = useState(false);
   const [proposal, setProposal] = useState<Proposal | null>(initialSearch);
+  const [autoNews, setAutoNews] = useState(initialAutoNews);
+
+  async function toggleAutoNews(on: boolean) {
+    setAutoNews(on);
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ autoNews: on }),
+    }).catch(() => null);
+    if (!res?.ok) {
+      setAutoNews(!on);
+      setError("Η ρύθμιση δεν αποθηκεύτηκε. Δοκίμασε ξανά.");
+      return;
+    }
+    // Αν μόλις δόθηκε η άδεια, ας τη χρησιμοποιήσει σύντομα.
+    if (on) schedule.current(5);
+  }
   const bottom = useRef<HTMLDivElement>(null);
 
   // Αν ο server έχει ενημερωθεί από τότε που άνοιξε η καρτέλα, η σελίδα ξαναφορτώνει μόνη της.
@@ -254,6 +272,11 @@ export function Chat({ initialMessages, initialValues, initialImpression, initia
 
       {inspect && (
         <aside className="inspector">
+          <h4>Άδειες</h4>
+          <label className="permit">
+            <input type="checkbox" checked={autoNews} onChange={(e) => toggleAutoNews(e.target.checked)} />
+            <span>Να διαβάζει μόνη της τις ειδήσεις της ημέρας, μία φορά τη μέρα</span>
+          </label>
           <h4>Τι κατάλαβε</h4>
           <p>{debug.note || "—"}</p>
           <h4>Εντύπωση για σένα</h4>

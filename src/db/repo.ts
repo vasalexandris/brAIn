@@ -19,6 +19,8 @@ export interface BrainState {
   values: BrainValues;
   impression: string;
   selfImage: string;
+  /** Έχει μόνιμη άδεια να διαβάζει τους τίτλους της ημέρας. */
+  autoNews?: boolean;
   turnCount: number;
   updatedAt: Date | null;
 }
@@ -78,6 +80,7 @@ export async function loadBrainState(db: Db, userId: string): Promise<BrainState
     values: normalizeValues(r.dims),
     impression: r.impression,
     selfImage: r.self_image,
+    autoNews: r.auto_news === true,
     turnCount: r.turn_count,
     updatedAt: new Date(r.updated_at),
   };
@@ -302,4 +305,26 @@ export async function recentMaterial(db: Db, userId: string, since: Date): Promi
     [userId, since.toISOString()],
   );
   return rows.map((r) => ({ query: r.query, text: r.material, at: new Date(r.created_at) }));
+}
+
+/**
+ * Δίνει ή παίρνει πίσω τη μόνιμη άδεια για τους τίτλους της ημέρας. Γράφει μόνο αυτή τη ρύθμιση,
+ * ώστε να μην αγγίζει την κατάσταση του εγκεφάλου· αν δεν υπάρχει ακόμη κατάσταση, τη δημιουργεί.
+ */
+export async function setAutoNews(db: Db, userId: string, on: boolean, now: Date): Promise<void> {
+  await db.query(
+    `INSERT INTO brain_states (user_id, dims, updated_at, auto_news) VALUES ($1, $2::text::jsonb, $3, $4)
+     ON CONFLICT (user_id) DO UPDATE SET auto_news = EXCLUDED.auto_news`,
+    [userId, JSON.stringify(normalizeValues(null)), now.toISOString(), on],
+  );
+}
+
+/** Η πιο πρόσφατη ολοκληρωμένη αναζήτηση μιας πηγής. */
+export async function lastDone(db: Db, userId: string, source: Search["source"]): Promise<Search | null> {
+  const rows = await db.query(
+    `SELECT * FROM searches WHERE user_id = $1 AND source = $2 AND status IN ('done', 'failed')
+      ORDER BY created_at DESC LIMIT 1`,
+    [userId, source],
+  );
+  return rows.length ? toSearch(rows[0]) : null;
 }
