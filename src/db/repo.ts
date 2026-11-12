@@ -292,19 +292,48 @@ export async function countSearchesSince(db: Db, userId: string, since: Date): P
   return rows[0].n;
 }
 
-export async function saveSearchMaterial(db: Db, id: string, material: string): Promise<void> {
-  await db.query(`UPDATE searches SET material = $2 WHERE id = $1`, [id, material]);
+/** Αποθηκεύει ό,τι διάβασε. Για μεγάλο κείμενο: `material` η περιγραφή, `full` ολόκληρο. */
+export async function saveSearchMaterial(db: Db, id: string, material: string, full: string | null = null): Promise<void> {
+  await db.query(`UPDATE searches SET material = $2, full_text = $3 WHERE id = $1`, [id, material, full]);
+}
+
+export interface ReadMaterial {
+  query: string;
+  text: string;
+  /** Το πλήρες κείμενο, όταν το `text` είναι μόνο περιγραφή. */
+  full: string | null;
+  at: Date;
 }
 
 /** Ό,τι διάβασε πρόσφατα: το υλικό των αναζητήσεων που ολοκληρώθηκαν από το `since` και μετά. */
-export async function recentMaterial(db: Db, userId: string, since: Date): Promise<{ query: string; text: string; at: Date }[]> {
+export async function recentMaterial(db: Db, userId: string, since: Date): Promise<ReadMaterial[]> {
   const rows = await db.query(
-    `SELECT query, material, created_at FROM searches
+    `SELECT query, material, full_text, created_at FROM searches
       WHERE user_id = $1 AND status = 'done' AND material IS NOT NULL AND created_at >= $2
       ORDER BY created_at DESC LIMIT 2`,
     [userId, since.toISOString()],
   );
-  return rows.map((r) => ({ query: r.query, text: r.material, at: new Date(r.created_at) }));
+  return rows.map((r) => ({ query: r.query, text: r.material, full: r.full_text ?? null, at: new Date(r.created_at) }));
+}
+
+/** Μια σελίδα που έχει ήδη διαβάσει και κρατά ολόκληρη: δεν χρειάζεται να την ξανακατεβάσει. */
+export async function storedPage(db: Db, userId: string, url: string, since: Date): Promise<string | null> {
+  const rows = await db.query(
+    `SELECT full_text FROM searches
+      WHERE user_id = $1 AND source = 'page' AND query = $2 AND full_text IS NOT NULL AND created_at >= $3
+      ORDER BY created_at DESC LIMIT 1`,
+    [userId, url, since.toISOString()],
+  );
+  return rows.length ? rows[0].full_text : null;
+}
+
+/** Οι διευθύνσεις των σελίδων που έχει διαβάσει: αυτές μπορεί να τις ξανανοίξει. */
+export async function readPageUrls(db: Db, userId: string, since: Date): Promise<string[]> {
+  const rows = await db.query(
+    `SELECT DISTINCT query FROM searches WHERE user_id = $1 AND source = 'page' AND status = 'done' AND created_at >= $2`,
+    [userId, since.toISOString()],
+  );
+  return rows.map((r) => r.query);
 }
 
 /**

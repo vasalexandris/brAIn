@@ -191,6 +191,8 @@ export function htmlToText(html: string): { title: string; text: string } {
 }
 
 const MAX_PAGE_BYTES = 2_000_000;
+/** Μια σελίδα κρατιέται ολόκληρη (ως αυτό το όριο)· το πόσο θα δει το μοντέλο το ορίζει ο καλών. */
+export const MAX_PAGE_CHARS = 60_000;
 
 /** Ανοίγει μια δημόσια ιστοσελίδα και επιστρέφει το κείμενό της. Κάθε ανακατεύθυνση ελέγχεται ξανά. */
 export async function readPage(raw: string, resolve: Resolve = resolveDns): Promise<Material> {
@@ -213,7 +215,7 @@ export async function readPage(raw: string, resolve: Resolve = resolveDns): Prom
     if (Number(res.headers.get("content-length") ?? 0) > MAX_PAGE_BYTES) throw new Error("Πολύ μεγάλη σελίδα");
     const raw = (await res.text()).slice(0, MAX_PAGE_BYTES);
     const page = /text\/plain/i.test(type) ? { title: "", text: raw.trim() } : htmlToText(raw);
-    return { titles: [page.title || url.host], text: `## ${page.title || url.host}\n${url.host}\n${page.text}`.slice(0, MAX_CHARS) };
+    return { titles: [page.title || url.host], text: `## ${page.title || url.host}\n${url.host}\n${page.text}`.slice(0, MAX_PAGE_CHARS) };
   }
   throw new Error("Πάρα πολλές ανακατευθύνσεις");
 }

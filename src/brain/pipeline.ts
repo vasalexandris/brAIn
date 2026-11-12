@@ -24,6 +24,7 @@ import {
   type Memory,
   type MemoryKind,
 } from "./memory";
+import { DOCUMENT_MIN_CHARS, excerpts } from "./document";
 import { HEADLINES_QUERY, SOURCES, SOURCE_LABELS, lookup as defaultLookup, type Lookup, type Source } from "./world";
 import {
   PERCEIVE_SYSTEM,
@@ -71,6 +72,9 @@ const SEARCH_COOLDOWN_MIN = 10;
 const SEARCH_MIN_URGE = 40;
 /** Για τόσα λεπτά μετά από μια αναζήτηση, το υλικό της μένει μπροστά της. */
 const MATERIAL_KEEP_MIN = 45;
+/** Για τόσες μέρες μια σελίδα που διάβασε μένει αποθηκευμένη και μπορεί να την ξανανοίξει χωρίς να την κατεβάσει. */
+const PAGE_KEEP_DAYS = 7;
+const daysAgo = (now: Date, days: number) => new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
 const dayAgo = (now: Date) => new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
 export class DailyLimitError extends Error {}
@@ -467,7 +471,23 @@ export async function processTurn(
   const { goals, lessons, hypotheses, rest } = splitGoals(memories, now);
   const goalTexts = goals.map((g) => g.content);
   const open = hypotheses.map((h) => ({ content: h.content, certainty: h.certainty }));
-  const material = await repo.recentMaterial(db, user.id, new Date(now.getTime() - MATERIAL_KEEP_MIN * 60000));
+  // Ό,τι διάβασε πρόσφατα. Για μεγάλες σελίδες: η περιγραφή τους, και μόνο τα κομμάτια που αφορούν
+  // αυτό που μόλις ειπώθηκε. Η σελίδα μένει στη βάση· στο context μπαίνει ό,τι χρειάζεται τώρα.
+  const lastAsked = [...stored].reverse().find((m) => m.role === "user")?.content ?? "";
+  const material = (
+    await repo.recentMaterial(db, user.id, new Date(now.getTime() - MATERIAL_KEEP_MIN * 60000))
+  ).map((m) => {
+    if (!m.full) return m;
+    const pieces = excerpts(m.full, `${message} ${lastAsked}`);
+    return {
+      ...m,
+      text: pieces.length
+        ? `${m.text}\n\nΑΠΟΣΠΑΣΜΑΤΑ ΤΗΣ ΣΕΛΙΔΑΣ ΠΟΥ ΤΑΙΡΙΑΖΟΥΝ ΜΕ ΤΗΝ ΚΟΥΒΕΝΤΑ ΤΩΡΑ:\n${pieces.join("\n[…]\n")}`
+        : `${m.text}\n\n(Κανένα σημείο της σελίδας δεν ταιριάζει με ό,τι μόλις ειπώθηκε.)`,
+    };
+  });
+  // Σελίδες που έχει ήδη διαβάσει μπορεί να τις ξανανοίξει, ακόμη κι αν η διεύθυνση δεν είναι πια στην κουβέντα.
+  const knownPages = await repo.readPageUrls(db, user.id, daysAgo(now, PAGE_KEEP_DAYS));
   const recalled = recall(rest, cue, valence(values), now);
 
   // 4. Απόκριση. Αν αποτύχει, ο γύρος ακυρώνεται και δεν αποθηκεύεται τίποτα.
@@ -505,7 +525,11 @@ export async function processTurn(
   }
   // Ιστοσελίδες: ανοίγει μόνο διεύθυνση που έχει πραγματικά δει — στα λόγια του συνομιλητή, στην
   // κουβέντα ή σε υλικό που διάβασε. Μια διεύθυνση που "θυμήθηκε" το μοντέλο είναι επινόηση.
-  if (marked.request?.source === "page" && !seen.includes(marked.request.query)) {
+  if (
+    marked.request?.source === "page" &&
+    !seen.includes(marked.request.query) &&
+    !knownPages.includes(marked.request.query)
+  ) {
     console.warn("[brAIn] αγνοήθηκε διεύθυνση που δεν έχει δει:", marked.request.query);
     marked = { text: marked.text, request: null };
   }
@@ -901,6 +925,8 @@ export async function resolveSearch(
     retry: SearchRequest | null;
     memories: Reflection["memories"];
     verdicts: Verdict[];
+    /** Για μεγάλη σελίδα: η περιγραφή της, που μένει μπροστά της αντί για ολόκληρο το κείμενο. */
+    overview: string | null;
   }
 
   /** Μία προσπάθεια: ψάχνει, διαβάζει, και κρίνει αν βρήκε αυτό που ζητήθηκε. */
@@ -915,12 +941,21 @@ export async function resolveSearch(
               return null;
             })
           : null;
-      material = web?.text ? web : await (deps.lookup ?? defaultLookup)(source, query);
+      // Σελίδα που κρατά ήδη ολόκληρη: δεν την ξανακατεβάζει.
+      const kept = source === "page" ? await repo.storedPage(db, user.id, query, daysAgo(now, PAGE_KEEP_DAYS)) : null;
+      material = kept
+        ? { titles: [kept.split("\n", 1)[0].replace(/^## /, "")], text: kept }
+        : web?.text
+          ? web
+          : await (deps.lookup ?? defaultLookup)(source, query);
     } catch (err) {
       console.error("[brAIn] η αναζήτηση απέτυχε:", err);
       return null;
     }
     if (!material.text) return null;
+    // Μεγάλη σελίδα: η πρώτη ανάγνωση δίνει περιγραφή. Το πλήρες κείμενο αποθηκεύεται και οι
+    // λεπτομέρειες ανασύρονται αργότερα, όταν ζητηθούν.
+    const large = source === "page" && material.text.length > DOCUMENT_MIN_CHARS;
 
     const raw = await llm
       .generateJson({
@@ -938,7 +973,15 @@ export async function resolveSearch(
             ...memoryMap(memories, now),
       autoNews: state.autoNews,
             hypotheses: hypotheses.map((h) => ({ content: h.content, certainty: h.certainty })),
-          }) + readingBlock(SOURCE_LABELS[source], query, asked, mayRetry && !unprompted, hypotheses.map((h) => h.content), unprompted),
+          }) + readingBlock(
+              SOURCE_LABELS[source],
+              query,
+              asked,
+              mayRetry && !unprompted,
+              hypotheses.map((h) => h.content),
+              unprompted,
+              large,
+            ),
         prompt: materialPrompt(material.text),
       })
       .catch((err) => {
@@ -959,7 +1002,15 @@ export async function resolveSearch(
     const next = isRecord(raw.retry) && typeof raw.retry.query === "string" ? raw.retry : null;
     const nextSource = next && SOURCES.includes(next.source as Source) ? (next.source as Source) : "web";
     const nextQuery = next ? String(next.query).trim().slice(0, 120) : "";
+    const outline = (Array.isArray(raw.outline) ? raw.outline : [])
+      .filter((x): x is string => typeof x === "string" && x.trim() !== "")
+      .slice(0, 12)
+      .map((x) => `- ${x.trim().slice(0, 160)}`);
+    const summary = typeof raw.summary === "string" && raw.summary.trim() ? raw.summary.trim().slice(0, 1200) : message;
     return {
+      overview: large
+        ? `${material.text.split("\n", 2).join("\n")}\nΔιεύθυνση: ${query}\nΠΕΡΙΓΡΑΦΗ: ${summary}${outline.length ? `\nΕΝΟΤΗΤΕΣ:\n${outline.join("\n")}` : ""}`
+        : null,
       source,
       query,
       material,
@@ -983,7 +1034,7 @@ export async function resolveSearch(
   const best = second?.found ? second : (first ?? second);
   if (!best) return fail();
   const { message, material } = best;
-  await repo.saveSearchMaterial(db, search.id, material.text.slice(0, 6000));
+  await repo.saveSearchMaterial(db, search.id, best.overview ?? material.text.slice(0, 6000), best.overview ? material.text : null);
 
   const storedNow: string[] = [];
   const keep = async (m: Reflection["memories"][number], kind: MemoryKind) => {
@@ -996,6 +1047,24 @@ export async function resolveSearch(
     storedNow.push(m.content);
   };
   for (const m of best.memories.slice(0, 3)) await keep(m, "knowledge");
+  // Μια μεγάλη σελίδα αφήνει πάντα μία ανάμνηση με την εικόνα της και τη διεύθυνσή της, ώστε να
+  // ξέρει ότι την έχει διαβάσει και να μπορεί να επιστρέψει — ό,τι κι αν έγραψε το μοντέλο.
+  if (best.overview && !best.memories.some((m) => `${m.content} ${m.detail}`.includes(best.query))) {
+    const title = material.titles[0] ?? best.query;
+    await keep(
+      {
+        kind: "knowledge",
+        topic: best.memories[0]?.topic || "ιστοσελίδες",
+        gist: `διάβασα τη σελίδα «${title.slice(0, 60)}»`,
+        content: `Διάβασα τη σελίδα «${title.slice(0, 120)}».`,
+        detail: best.overview.slice(0, 1800),
+        certainty: 1,
+        importance: 50,
+        valence: 0.1,
+      },
+      "knowledge",
+    );
+  }
   // Το υλικό μπορεί να κρίνει υποθέσεις που είχε κάνει: έτσι η εικασία γίνεται γνώση ή μάθημα.
   const judged = await settle(db, best.verdicts, hypotheses, `από αναζήτηση «${best.query}»`, now);
   storedNow.push(...judged.notes);

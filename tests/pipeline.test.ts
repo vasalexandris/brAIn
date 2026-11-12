@@ -908,6 +908,83 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     expect(calls.filter((c) => c.startsWith("headlines"))).toHaveLength(2);
   });
 
+  it("μεγάλη σελίδα: περιγραφή πρώτα, ολόκληρη στη βάση, και σε κάθε ερώτηση μόνο το σχετικό κομμάτι", async () => {
+    const u = await createUser(db, { email: "doc@x.gr", name: "Βασίλης", passwordHash: "x" });
+    let clock = new Date("2026-11-13T09:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    const url = "https://example.com/thalassa";
+    const filler = (n: number) => `ΑΣΧΕΤΟ-ΤΜΗΜΑ-${n}: γενικά λόγια για κύματα, ρεύματα και παλίρροιες. `.repeat(40);
+    const page =
+      "## Η ζωή στον ωκεανό\nexample.com\n" +
+      [filler(1), filler(2), filler(3), filler(4), "Οι φυσητήρες βουτούν σε βάθος 2.250 μέτρων για να κυνηγήσουν καλαμάρια.", filler(5), filler(6)].join("\n\n");
+    expect(page.indexOf("φυσητήρες")).toBeGreaterThan(8000); // πολύ πέρα από όσα χωρούσαν πριν
+    const calls: string[] = [];
+    const lookup = async (source: string, query: string) => {
+      calls.push(`${source}:${query}`);
+      return { titles: ["Η ζωή στον ωκεανό"], text: page };
+    };
+    let system = "";
+    let readingSystem = "";
+    let readingPrompt = "";
+    let text = "Ας το δω.";
+    const model: LlmProvider = {
+      name: "model",
+      embed: llm.embed.bind(llm),
+      generateText: async (req) => {
+        system = req.system;
+        return text;
+      },
+      generateJson: async (req) => {
+        if (!req.prompt.includes("<υλικό>")) return { perception: {}, impulses: {} };
+        readingSystem = req.system;
+        readingPrompt = req.prompt;
+        return llm.generateJson(req);
+      },
+    };
+
+    await processTurn({ db, llm: model, lookup, now: at(1) }, u, "Γεια");
+    const read = await processTurn({ db, llm: model, lookup, now: at(1) }, u, `Διάβασε αυτό: ${url}`);
+    // Η πρώτη ανάγνωση βλέπει ολόκληρη τη σελίδα και δίνει περιγραφή.
+    expect(readingSystem).toContain("ΠΡΩΤΗ ΑΝΑΓΝΩΣΗ");
+    expect(readingPrompt).toContain("2.250 μέτρων");
+    expect(read.extra).toContain("Είναι μια σελίδα για «Η ζωή στον ωκεανό»");
+    // Στη βάση: η περιγραφή ως υλικό, ολόκληρο το κείμενο χωριστά, και μια ανάμνηση με τη διεύθυνση.
+    const [row] = await db.query(`SELECT material, full_text FROM searches WHERE user_id = $1 AND source = 'page'`, [u.id]);
+    expect(row.material).toContain("ΠΕΡΙΓΡΑΦΗ: Σελίδα με θέμα");
+    expect(row.material).toContain("ΕΝΟΤΗΤΕΣ:\n- Εισαγωγή");
+    expect(row.material).not.toContain("φυσητήρες");
+    expect(row.full_text).toBe(page);
+    expect((await listMemories(db, u.id)).some((m) => m.detail.includes(url))).toBe(true);
+
+    // Επόμενη ερώτηση: στο context μπαίνει η περιγραφή και ΜΟΝΟ το κομμάτι που την αφορά.
+    await processTurn({ db, llm: model, lookup, now: at(2) }, u, "Σε τι βάθος βουτάνε οι φυσητήρες;");
+    expect(system).toContain("ΠΕΡΙΓΡΑΦΗ: Σελίδα με θέμα");
+    expect(system).toContain("βουτούν σε βάθος 2.250 μέτρων");
+    const shown = system.slice(system.indexOf("ΑΠΟΣΠΑΣΜΑΤΑ ΤΗΣ ΣΕΛΙΔΑΣ"), system.indexOf("ΓΙΑ ΑΥΤΗ ΤΗΝ ΑΠΑΝΤΗΣΗ"));
+    expect(shown).toContain("2.250 μέτρων");
+    expect(shown).not.toMatch(/ΑΣΧΕΤΟ-ΤΜΗΜΑ-[1236]/);
+    expect(shown.length).toBeLessThan(2000);
+    expect(system.length).toBeLessThan(page.length);
+    // Σκορ ή αριθμοί από το απόσπασμα δεν θεωρούνται επινόηση: το έχει μπροστά της.
+
+    // Ένα σύντομο μήνυμα-συνέχεια κρατά το νήμα της προηγούμενης ερώτησης.
+    await processTurn({ db, llm: model, lookup, now: at(2) }, u, "Καλά.");
+    expect(system).toContain("2.250 μέτρων");
+    // Όταν η κουβέντα φύγει από το θέμα: κανένα απόσπασμα, μόνο η περιγραφή.
+    await processTurn({ db, llm: model, lookup, now: at(2) }, u, "Εντάξει λοιπόν.");
+    expect(system).toContain("Κανένα σημείο της σελίδας δεν ταιριάζει");
+    expect(system).not.toContain("2.250 μέτρων");
+
+    // Δύο μέρες μετά ζητά να την ξανανοίξει: επιτρέπεται (την έχει διαβάσει) και δεν την ξανακατεβάζει.
+    expect(calls).toEqual([`page:${url}`]);
+    text = `Θέλω να την ξαναδώ.\n[ΑΝΟΙΞΕ: ${url}]`;
+    const again = await processTurn({ db, llm: model, lookup, now: at(2 * 24 * 60) }, u, "Θυμάσαι εκείνη τη σελίδα για τη θάλασσα;");
+    expect(again.search).toMatchObject({ source: "page", query: url });
+    await resolveSearch({ db, llm: model, lookup, now: at(1) }, u, again.search!.id, true);
+    expect(calls).toEqual([`page:${url}`]);
+    expect(readingPrompt).toContain("2.250 μέτρων");
+  });
+
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {
     const broken: LlmProvider = {
       name: "broken",
