@@ -64,6 +64,8 @@ CREATE INDEX IF NOT EXISTS searches_user_time ON searches (user_id, created_at);
 -- Το κείμενο που βρέθηκε: μένει διαθέσιμο για λίγο, ώστε οι επόμενες ερωτήσεις να απαντώνται
 -- από αυτό και όχι από τη φαντασία του μοντέλου.
 ALTER TABLE searches ADD COLUMN IF NOT EXISTS material text;
+-- Για μεγάλες σελίδες: το πλήρες κείμενο. Στο material μένει τότε μόνο η περιγραφή.
+ALTER TABLE searches ADD COLUMN IF NOT EXISTS full_text text;
 
 -- Μακρόχρονη μνήμη: μόνο ό,τι άξιζε να κρατηθεί.
 CREATE TABLE IF NOT EXISTS memories (

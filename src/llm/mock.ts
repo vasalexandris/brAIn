@@ -37,9 +37,11 @@ export class MockProvider implements LlmProvider {
   async generateJson(req: { system: string; prompt: string }): Promise<unknown> {
     if (req.prompt.includes("<υλικό>")) {
       const title = /## (.+)/.exec(req.prompt)?.[1] ?? "κάτι";
+      const first = req.system.includes("ΠΡΩΤΗ ΑΝΑΓΝΩΣΗ");
       return {
+        ...(first ? { summary: `Σελίδα με θέμα «${title}».`, outline: ["Εισαγωγή", "Κυρίως μέρος", "Συμπεράσματα"] } : {}),
         found: true,
-        message: `Διάβασα για «${title}». Δεν το ήξερα έτσι.`,
+        message: first ? `Είναι μια σελίδα για «${title}». Μπορώ να εμβαθύνω όπου θες.` : `Διάβασα για «${title}». Δεν το ήξερα έτσι.`,
         memories: [
           {
             topic: "γνώσεις",
