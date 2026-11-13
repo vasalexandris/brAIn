@@ -1030,6 +1030,107 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     expect(found.debug.note).toBe("ρωτά γιατί τον χτυπά το ρεύμα · Έννοιες: ηλεκτρικό ρεύμα, τάση, ηλεκτροπληξία");
   });
 
+  it("σκέφτεται ιδιωτικά πριν μιλήσει: η σκέψη δεν φτάνει ποτέ στον συνομιλητή, αλλά τη θυμάται", async () => {
+    const u = await createUser(db, { email: "think@x.gr", name: "Βασίλης", passwordHash: "x" });
+    let clock = new Date("2026-11-14T10:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    let system = "";
+    let output = "";
+    const model: LlmProvider = {
+      name: "model",
+      embed: llm.embed.bind(llm),
+      generateText: async (req) => {
+        system = req.system;
+        return output;
+      },
+      generateJson: async () => ({ perception: {}, impulses: {} }),
+    };
+
+    // Η σκέψη αφαιρείται, αποθηκεύεται χωριστά και φαίνεται μόνο στον πίνακα της εσωτερικής κατάστασης.
+    output = "<σκέψη>Μου ήρθε να τον κοροϊδέψω, αλλά είναι κουρασμένος. Καλύτερα ήρεμα.</σκέψη>\nΚαλημέρα, πώς πέρασες;";
+    const first = await processTurn({ db, llm: model, now: at(1) }, u, "Καλημέρα, ήταν δύσκολη μέρα.");
+    expect(system).toContain("Πριν απαντήσεις, γράψε μια εσωτερική σκέψη");
+    expect(first.reply).toBe("Καλημέρα, πώς πέρασες;");
+    expect(first.debug.thought).toBe("Μου ήρθε να τον κοροϊδέψω, αλλά είναι κουρασμένος. Καλύτερα ήρεμα.");
+    const chat = (await recentMessages(db, u.id, 5)).map((m) => m.content).join("\n");
+    expect(chat).not.toContain("σκέψη");
+    expect(chat).not.toContain("κοροϊδέψω");
+
+    // Στην επόμενη απάντηση την έχει μπροστά της, ως κάτι ιδιωτικό.
+    output = "Ναι;";
+    await processTurn({ db, llm: model, now: at(5) }, u, "Τίποτα, απλά κουράστηκα.");
+    expect(system).toContain("ΤΙ ΣΚΕΦΤΗΚΕΣ ΠΡΟΣΦΑΤΑ (ιδιωτικά");
+    expect(system).toContain("Μου ήρθε να τον κοροϊδέψω");
+
+    // Σκέψη που δεν έκλεισε και δεν άφησε απάντηση: ξαναρωτά χωρίς σκέψη, η απάντηση δεν χάνεται.
+    let calls = 0;
+    const flaky: LlmProvider = {
+      ...model,
+      name: "flaky",
+      generateText: async (req) => {
+        calls++;
+        system = req.system;
+        return req.system.includes("Πριν απαντήσεις, γράψε") ? "<σκέψη>Δεν ξέρω τι να πω" : "Εδώ είμαι.";
+      },
+    };
+    const recovered = await processTurn({ db, llm: flaky, now: at(5) }, u, "Εντάξει;");
+    expect(calls).toBe(2);
+    expect(recovered.reply).toBe("Εδώ είμαι.");
+    expect(system).toContain("ΕΣΩΤΕΡΙΚΗ ΣΚΕΨΗ: καμία τώρα");
+
+    // Ο αυθόρμητος μιλά χωρίς σκέψη: καμία σκέψη δεν ζητείται ούτε αποθηκεύεται.
+    const st = await loadBrainState(db, u.id);
+    await db.query(`UPDATE brain_states SET dims = $2::text::jsonb WHERE user_id = $1`, [
+      u.id,
+      JSON.stringify({ ...st.values, spontaneity: 100, restraint: 0, anger: 0, fear: 0, hurt: 0 }),
+    ]);
+    output = "Χαχα, ναι.";
+    const quick = await processTurn({ db, llm: model, now: at(1) }, u, "χαχα");
+    expect(system).toContain("ΕΣΩΤΕΡΙΚΗ ΣΚΕΨΗ: καμία τώρα");
+    expect(quick.debug.thought).toBe("");
+    expect(quick.reply).toBe("Χαχα, ναι.");
+  });
+
+  it("όταν σωπαίνεις μπορεί να σκεφτεί χωρίς να μιλήσει — και να το ξανασκεφτεί αργότερα", async () => {
+    const u = await createUser(db, { email: "quiet@x.gr", name: "Βασίλης", passwordHash: "x" });
+    let clock = new Date("2026-11-15T10:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    let output = "<σκέψη>Θα ήθελα να τον ρωτήσω για τη δουλειά, αλλά είναι νωρίς. Θα περιμένω.</σκέψη>\n[ΣΙΩΠΗ]";
+    let system = "";
+    const model: LlmProvider = {
+      name: "model",
+      embed: llm.embed.bind(llm),
+      generateText: async (req) => {
+        system = req.system;
+        return output;
+      },
+      generateJson: async () => ({ perception: {}, impulses: {} }),
+    };
+    await processTurn({ db, llm: llm, now: at(1) }, u, "Γεια σου!");
+    const before = (await recentMessages(db, u.id, 10)).length;
+
+    const wait = (await pulse({ db, llm: model, now: at(0.5) }, u)).nextInSec!;
+    const silent = await pulse({ db, llm: model, now: at(wait / 60) }, u);
+    expect(silent.message).toBeNull();
+    expect(silent.nextInSec).toBe(3600);
+    expect((await recentMessages(db, u.id, 10)).length).toBe(before); // τίποτα δεν εμφανίστηκε στην κουβέντα
+    expect(system).toContain("[ΣΙΩΠΗ]");
+
+    // Αμέσως μετά, δεν ξανασκέφτεται· υπάρχει αναμονή.
+    let asked = 0;
+    const counting: LlmProvider = { ...model, generateText: async (req) => { asked++; return model.generateText(req); } };
+    const again = await pulse({ db, llm: counting, now: at(5) }, u);
+    expect(again.message).toBeNull();
+    expect(asked).toBe(0);
+    expect(again.nextInSec).toBeGreaterThan(50 * 60);
+
+    // Η σκέψη που δεν είπε την έχει μπροστά της, επισημασμένη, όταν τελικά μιλήσει.
+    output = "Σκεφτόμουν κάτι για τη δουλειά σου. Πώς πάει;";
+    await pulse({ db, llm: model, now: at(70) }, u);
+    expect(system).toContain("(δεν το είπες): Θα ήθελα να τον ρωτήσω για τη δουλειά");
+    expect(system).toContain("μπορείς να επιστρέψεις σε κάτι που σκέφτηκες και δεν είπες");
+  });
+
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {
     const broken: LlmProvider = {
       name: "broken",

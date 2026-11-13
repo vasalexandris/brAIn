@@ -67,6 +67,16 @@ ALTER TABLE searches ADD COLUMN IF NOT EXISTS material text;
 -- Για μεγάλες σελίδες: το πλήρες κείμενο. Στο material μένει τότε μόνο η περιγραφή.
 ALTER TABLE searches ADD COLUMN IF NOT EXISTS full_text text;
 
+-- Ιδιωτικές σκέψεις: τι σκέφτηκε πριν μιλήσει, και όσα σκέφτηκε χωρίς να τα πει ποτέ.
+CREATE TABLE IF NOT EXISTS thoughts (
+  id         text PRIMARY KEY,
+  user_id    text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  content    text NOT NULL,
+  spoken     boolean NOT NULL,
+  created_at timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS thoughts_user_time ON thoughts (user_id, created_at);
+
 -- Μακρόχρονη μνήμη: μόνο ό,τι άξιζε να κρατηθεί.
 CREATE TABLE IF NOT EXISTS memories (
   id               text PRIMARY KEY,

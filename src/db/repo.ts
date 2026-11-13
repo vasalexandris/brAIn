@@ -357,3 +357,43 @@ export async function lastDone(db: Db, userId: string, source: Search["source"])
   );
   return rows.length ? toSearch(rows[0]) : null;
 }
+
+// ----------------------------------------------------------------- Σκέψεις
+
+export interface Thought {
+  content: string;
+  /** Έγινε απάντηση; Αν όχι, τη σκέφτηκε και δεν την είπε. */
+  spoken: boolean;
+  at: Date;
+}
+
+export async function addThought(db: Db, userId: string, content: string, spoken: boolean, now: Date): Promise<void> {
+  if (!content.trim()) return;
+  await db.query(`INSERT INTO thoughts (id, user_id, content, spoken, created_at) VALUES ($1, $2, $3, $4, $5)`, [
+    randomUUID(),
+    userId,
+    content.trim(),
+    spoken,
+    now.toISOString(),
+  ]);
+}
+
+/** Οι πρόσφατες σκέψεις, πιο πρόσφατη πρώτη. */
+export async function recentThoughts(db: Db, userId: string, since: Date, limit: number): Promise<Thought[]> {
+  const rows = await db.query(
+    `SELECT content, spoken, created_at FROM thoughts WHERE user_id = $1 AND created_at >= $2
+      ORDER BY created_at DESC LIMIT $3`,
+    [userId, since.toISOString(), limit],
+  );
+  return rows.map((r) => ({ content: r.content, spoken: r.spoken, at: new Date(r.created_at) }));
+}
+
+/** Πόσες φορές σκέφτηκε χωρίς να μιλήσει, και πότε ήταν η τελευταία. */
+export async function silentThoughts(db: Db, userId: string, since: Date): Promise<{ count: number; last: Date | null }> {
+  const rows = await db.query(
+    `SELECT count(*)::int AS n, max(created_at) AS last FROM thoughts
+      WHERE user_id = $1 AND spoken = false AND created_at >= $2`,
+    [userId, since.toISOString()],
+  );
+  return { count: rows[0].n, last: rows[0].last ? new Date(rows[0].last) : null };
+}

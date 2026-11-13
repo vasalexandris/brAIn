@@ -25,6 +25,7 @@ import {
   type MemoryKind,
 } from "./memory";
 import { DOCUMENT_MIN_CHARS, excerpts } from "./document";
+import { extractThought, thinkingDepth } from "./thought";
 import { HEADLINES_QUERY, SOURCES, SOURCE_LABELS, lookup as defaultLookup, type Lookup, type Source } from "./world";
 import {
   PERCEIVE_SYSTEM,
@@ -65,6 +66,9 @@ import {
  */
 export const DAILY_MESSAGE_LIMIT = Number(process.env.DAILY_MESSAGE_LIMIT) || 200;
 const DAILY_INITIATIVE_LIMIT = 6;
+/** Φορές που μπορεί να σκεφτεί «να πω κάτι;» και να αποφασίσει να σωπάσει, ανά 24 ώρες· και ανάμεσά τους λεπτά. */
+const DAILY_SILENT_LIMIT = 6;
+const SILENT_COOLDOWN_MIN = 60;
 export const DAILY_SEARCH_LIMIT = 20;
 /** Μετά από μια πρόταση αναζήτησης (όπως κι αν κατέληξε) δεν ξαναπροτείνει για τόσα λεπτά. */
 const SEARCH_COOLDOWN_MIN = 10;
@@ -214,6 +218,8 @@ export interface TurnResult {
     lessons: string[];
     /** Τα ράφια της μνήμης: για ποια θέματα ξέρει ότι ξέρει κάτι. */
     topics?: string[];
+    /** Τι σκέφτηκε ιδιωτικά πριν απαντήσει. */
+    thought?: string;
     /** Οι ανεπιβεβαίωτες υποθέσεις της. */
     hypotheses?: string[];
   };
@@ -505,27 +511,36 @@ export async function processTurn(
   const knownPages = await repo.readPageUrls(db, user.id, daysAgo(now, PAGE_KEEP_DAYS));
   const recalled = recall(rest, cue, valence(values), now);
 
-  // 4. Απόκριση. Αν αποτύχει, ο γύρος ακυρώνεται και δεν αποθηκεύεται τίποτα.
-  const raw = await llm.generateText({
-    system: respondSystem({
-      values,
-      impression: state.impression,
-      selfImage: state.selfImage,
-      goals: goalTexts,
-      lessons,
-      ...memoryMap(memories, now),
-      autoNews: state.autoNews,
-      periphery: periphery(rest, cue, recalled, now),
-      hypotheses: open,
-      recalled,
-      userName: user.name,
-      now,
-      time,
-      material,
-    }),
-    messages: [...history, { role: "user", content: message }],
-    temperature: replyTemperature(values),
-  });
+  // 4. Απόκριση, με εσωτερική σκέψη πρώτα όσο ζητά η στιγμή. Αν αποτύχει, ο γύρος ακυρώνεται.
+  const depth = thinkingDepth(values, { message, hasMaterial: material.length > 0 });
+  const priorThoughts = await repo.recentThoughts(db, user.id, new Date(now.getTime() - 24 * 60 * 60 * 1000), 4);
+  const respond = (d: typeof depth) =>
+    llm.generateText({
+      system: respondSystem({
+        values,
+        impression: state.impression,
+        selfImage: state.selfImage,
+        goals: goalTexts,
+        lessons,
+        ...memoryMap(memories, now),
+        autoNews: state.autoNews,
+        periphery: periphery(rest, cue, recalled, now),
+        hypotheses: open,
+        recalled,
+        userName: user.name,
+        now,
+        time,
+        material,
+        depth: d,
+        thoughts: priorThoughts,
+      }),
+      messages: [...history, { role: "user", content: message }],
+      temperature: replyTemperature(values),
+    });
+  let spokenOut = extractThought(await respond(depth));
+  // Αν η σκέψη δεν έκλεισε και δεν έμεινε απάντηση, ξαναρωτάμε χωρίς σκέψη: η απάντηση δεν χάνεται.
+  if (!spokenOut.text) spokenOut = { ...spokenOut, text: extractThought(await respond(0)).text };
+  const raw = spokenOut.text;
   let marked = extractSearchMarker(raw);
   // Κάθε σκορ που αναφέρει πρέπει να υπάρχει κάπου που το είδε: στο υλικό που διάβασε πρόσφατα ή
   // στην ίδια την κουβέντα. Αλλιώς το επινόησε, και η απάντηση δεν φτάνει στον συνομιλητή.
@@ -733,6 +748,7 @@ export async function processTurn(
     [search] = await propose(reflection.search, true);
   }
 
+  await repo.addThought(db, user.id, spokenOut.thought, true, now);
   await repo.addMessage(db, user.id, "user", message, { appraisal }, now);
   await repo.addMessage(db, user.id, "assistant", reply, { values, expressed: reflection.expressed }, new Date(now.getTime() + 1));
   await repo.saveBrainState(db, user.id, { values, impression, selfImage, turnCount: state.turnCount + 1, updatedAt: now }, now);
@@ -759,6 +775,7 @@ export async function processTurn(
       stored: storedNow,
       impression,
       selfImage,
+      thought: spokenOut.thought,
       lessons: [...lessons, ...newLessons].slice(-ACTIVE_LESSONS),
       hypotheses: [
         ...hypotheses.filter((h, i) => !reflection.verdicts.some((v) => v.n === i + 1)).map((h) => h.content),
@@ -839,10 +856,17 @@ export async function pulse(
   if ((await repo.countSince(db, user.id, "proactive", dayAgo(now))) >= DAILY_INITIATIVE_LIMIT) {
     return { message: null, values: null, nextInSec: 1800 };
   }
+  // Αν μόλις σκέφτηκε και αποφάσισε να σωπάσει, δεν ξανασκέφτεται αμέσως· και υπάρχει ημερήσιο όριο.
+  const silent = await repo.silentThoughts(db, user.id, dayAgo(now));
+  if (silent.count >= DAILY_SILENT_LIMIT) return { message: null, values: null, nextInSec: 3600 };
+  if (silent.last && minutesBetween(silent.last, now) < SILENT_COOLDOWN_MIN) {
+    return { message: null, values: null, nextInSec: Math.ceil((SILENT_COOLDOWN_MIN - minutesBetween(silent.last, now)) * 60) + 1 };
+  }
 
   const memories = await repo.listMemories(db, user.id);
   const { goals, lessons, hypotheses, rest } = splitGoals(memories, now);
   const recalled = recall(rest, [], valence(values), now, 4);
+  const priorThoughts = await repo.recentThoughts(db, user.id, new Date(now.getTime() - 24 * 60 * 60 * 1000), 4);
   const spoken = await llm.generateText({
     system:
       respondSystem({
@@ -858,13 +882,25 @@ export async function pulse(
         userName: user.name,
         now,
         time,
+        // Όταν παίρνει πρωτοβουλία σκέφτεται πάντα πρώτα: μπορεί να καταλήξει ότι δεν αξίζει να μιλήσει.
+        depth: 1,
+        thoughts: priorThoughts,
       }) +
       initiativeBlock(quietMin, unanswered),
     messages: [...stored.map((m) => ({ role: m.role, content: m.content })), { role: "user", content: silenceTurn(quietMin) }],
     temperature: replyTemperature(values),
   });
-  const message = extractSearchMarker(spoken).text;
+  const inner = extractThought(spoken);
+  const message = extractSearchMarker(inner.text).text;
+  // Σκέφτηκε και αποφάσισε να μη μιλήσει: η σκέψη μένει, και η ώθηση ικανοποιείται λίγο.
+  if (/\[\s*ΣΙΩΠΗ\s*\]/i.test(inner.text) || (!message && inner.thought)) {
+    await repo.addThought(db, user.id, inner.thought, false, now);
+    values = applyActs(values, ["u_ask", "u_share"]);
+    await repo.saveBrainState(db, user.id, { ...state, values, updatedAt: now }, now);
+    return { message: null, values: null, nextInSec: SILENT_COOLDOWN_MIN * 60 };
+  }
   if (!message) return { message: null, values: null, nextInSec: 300 };
+  await repo.addThought(db, user.id, inner.thought, true, now);
 
   // Είπε αυτό που ήθελε: οι παρορμήσεις που την έσπρωξαν ικανοποιούνται.
   values = applyActs(values, ["u_ask", "u_share"]);
