@@ -23,6 +23,14 @@ export class MockProvider implements LlmProvider {
   readonly name = "mock";
 
   async generateText(req: { system: string; messages: ChatMessage[] }): Promise<string> {
+    const text = this.say(req);
+    // Όταν ζητείται εσωτερική σκέψη, ο δοκιμαστικός πάροχος γράφει μία, πριν την απάντηση.
+    return req.system.includes("Πριν απαντήσεις, γράψε μια εσωτερική σκέψη")
+      ? `<σκέψη>Μου ήρθε να απαντήσω άμεσα. Αυτό που θα πω το ξέρω ή το υποθέτω;</σκέψη>\n${text}`
+      : text;
+  }
+
+  private say(req: { system: string; messages: ChatMessage[] }): string {
     const last = req.messages[req.messages.length - 1]?.content ?? "";
     if (req.system.includes("ΠΡΩΤΟΒΟΥΛΙΑ")) return "Κάτι σκεφτόμουν όση ώρα έλειπες… τι κάνεις τώρα;";
     const topic = /ψάξε για ([^.;!?]+)/i.exec(last);

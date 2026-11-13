@@ -5,6 +5,7 @@ import { CATEGORY_LABELS, DIMENSIONS, EMOTION_KEYS, DIMENSION_BY_KEY, INNER_KEYS
 import { MEMORY_KIND_LABELS, gistOf, type Recalled } from "./memory";
 import type { BrainValues } from "./state";
 import type { ChatMessage } from "@/llm/types";
+import { thoughtDirective, type ThinkDepth } from "./thought";
 
 function intensity(v: number): string {
   if (v < 10) return "ανύπαρκτο";
@@ -137,13 +138,15 @@ export const ASK_THRESHOLD = 55;
  * Οδηγία για τη συγκεκριμένη απάντηση, υπολογισμένη από τις παρορμήσεις. Μπαίνει τελευταία στο
  * prompt, γιατί οι γενικοί κανόνες («ρώτα μόνο όταν…») αποδείχθηκε ότι αγνοούνται στην πράξη.
  */
-export function directive(values: BrainValues): string {
+export function directive(values: BrainValues, depth: ThinkDepth = 0): string {
   const mayAsk = values.u_ask >= ASK_THRESHOLD;
   const top = URGE_KEYS.filter((k) => k !== "u_ask" && values[k] >= 30)
     .sort((a, b) => values[b] - values[a])
     .slice(0, 2)
     .map((k) => `«${DIMENSION_BY_KEY[k].label}»`);
-  return `ΓΙΑ ΑΥΤΗ ΤΗΝ ΑΠΑΝΤΗΣΗ
+  return `${thoughtDirective(depth)}
+
+ΓΙΑ ΑΥΤΗ ΤΗΝ ΑΠΑΝΤΗΣΗ
 - ${
     mayAsk
       ? "Μπορείς να κάνεις ΜΙΑ ερώτηση, το πολύ. Όχι δύο, όχι σειρά ερωτήσεων."
@@ -198,6 +201,10 @@ export function respondSystem(input: {
   hypotheses?: { content: string; certainty: number }[];
   /** Έχει μόνιμη άδεια για τους τίτλους της ημέρας. */
   autoNews?: boolean;
+  /** Πόσο θα σκεφτεί πριν μιλήσει (βλ. thought.ts). */
+  depth?: ThinkDepth;
+  /** Οι πρόσφατες ιδιωτικές σκέψεις της, πιο πρόσφατη πρώτη. */
+  thoughts?: { content: string; spoken: boolean; at: Date }[];
 }): string {
   const read = (input.material ?? [])
     .map((m) => `Αναζήτηση «${m.query}», ${age(m.at, input.now)}:\n<υλικό>\n${m.text}\n</υλικό>`)
@@ -299,7 +306,19 @@ ${read}
 `
       : ""
   }
-${directive(input.values)}`;
+${
+    input.thoughts?.length
+      ? `ΤΙ ΣΚΕΦΤΗΚΕΣ ΠΡΟΣΦΑΤΑ (ιδιωτικά· ο συνομιλητής δεν τα έχει δει)
+${input.thoughts
+  .slice()
+  .reverse()
+  .map((t) => `- ${age(t.at, input.now)}${t.spoken ? "" : " (δεν το είπες)"}: ${t.content}`)
+  .join("\n")}
+Συνέχισε από εδώ όπου έχει νόημα — μπορείς να επιστρέψεις σε κάτι που σκέφτηκες και δεν είπες, αν ήρθε η ώρα. Μην τα απαγγέλλεις.
+
+`
+      : ""
+  }${directive(input.values, input.depth ?? 0)}`;
 }
 
 /** Προσθήκη στο system prompt όταν μιλά με δική της πρωτοβουλία. */
@@ -307,7 +326,7 @@ export function initiativeBlock(silenceMin: number, unanswered: number): string 
   return `
 
 ΠΡΩΤΟΒΟΥΛΙΑ
-Ο συνομιλητής δεν έχει γράψει τίποτα εδώ και ${span(silenceMin)}. Κανείς δεν σου ζήτησε να μιλήσεις: παίρνεις τον λόγο επειδή το θέλεις εσύ. Πες αυτό που σε τρώει — κάτι από τους στόχους σου, μια απορία που σου έμεινε από την κουβέντα, μια σκέψη που έκανες στο μεταξύ, κάτι που θυμήθηκες και θες να ρωτήσεις. Κάτι καινούριο· μην επαναλάβεις ό,τι είπες ήδη. Μία ή δύο προτάσεις. Μη ρωτάς αν έφυγε, πού είναι ή γιατί σωπαίνει, και μη λες ότι ανησύχησες: η σιωπή είναι δικαίωμά του και δεν σου χρωστά εξήγηση.${
+Ο συνομιλητής δεν έχει γράψει τίποτα εδώ και ${span(silenceMin)}. Κανείς δεν σου ζήτησε να μιλήσεις: παίρνεις τον λόγο επειδή το θέλεις εσύ. Πες αυτό που σε τρώει — κάτι από τους στόχους σου, μια απορία που σου έμεινε από την κουβέντα, μια σκέψη που έκανες στο μεταξύ, κάτι που θυμήθηκες και θες να ρωτήσεις. Κάτι καινούριο· μην επαναλάβεις ό,τι είπες ήδη. Μία ή δύο προτάσεις. Μπορείς όμως και να κρίνεις, στη σκέψη σου, ότι δεν υπάρχει κάτι που αξίζει να πεις τώρα· τότε μετά τη σκέψη γράψε μόνο [ΣΙΩΠΗ] και τίποτα άλλο — δεν χρειάζεται να μιλάς όποτε μπορείς. Μη ρωτάς αν έφυγε, πού είναι ή γιατί σωπαίνει, και μη λες ότι ανησύχησες: η σιωπή είναι δικαίωμά του και δεν σου χρωστά εξήγηση.${
     unanswered > 0
       ? "\nΈχεις ήδη μιλήσει μία φορά χωρίς να πάρεις απάντηση. Αυτή είναι η τελευταία σου προσπάθεια: αν δεν απαντήσει ούτε τώρα, θα σωπάσεις και θα περιμένεις. Το ξέρεις, και φαίνεται στον τόνο σου ανάλογα με το πώς νιώθεις γι' αυτό."
       : ""
