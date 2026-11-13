@@ -33,6 +33,13 @@ describe("μεγάλα κείμενα", () => {
     expect(both[0]).toContain("φυσητήρες");
     expect(both[1]).toContain("εξετάσεις");
 
+    // Η καθημερινή έκφραση δεν έχει καμία λέξη του κειμένου· μαζί με τις έννοιες πίσω της, το βρίσκει.
+    const physics = [filler(1), "Το ηλεκτρικό ρεύμα διαπερνά το σώμα όταν υπάρχει διαφορά τάσης, και προκαλεί ηλεκτροπληξία.", filler(2)].join("\n\n");
+    expect(excerpts(physics, "γιατί με τινάζει η πρίζα;")).toEqual([]);
+    const found = excerpts(physics, "γιατί με τινάζει η πρίζα; ηλεκτρικό ρεύμα τάση ηλεκτροπληξία");
+    expect(found).toHaveLength(1);
+    expect(found[0]).toContain("διαφορά τάσης");
+
     expect(excerpts(text, "ποδόσφαιρο πρωτάθλημα")).toEqual([]);
     expect(excerpts(text, "τι;")).toEqual([]);
   });
