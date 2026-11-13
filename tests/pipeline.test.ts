@@ -985,6 +985,51 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     expect(readingPrompt).toContain("2.250 μέτρων");
   });
 
+  it("ψάχνει στη σελίδα και με τις έννοιες πίσω από τα λόγια του: «με τινάζει η πρίζα» βρίσκει το ρεύμα", async () => {
+    const u = await createUser(db, { email: "terms@x.gr", name: "Βασίλης", passwordHash: "x" });
+    let clock = new Date("2026-11-13T15:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    const filler = (n: number) => `Τμήμα ${n}: ιστορικά στοιχεία για τους αρχαίους και το κεχριμπάρι. `.repeat(45);
+    const page =
+      "## Ηλεκτρισμός\nexample.com\n" +
+      [filler(1), filler(2), filler(3), "Το ηλεκτρικό ρεύμα διαπερνά το σώμα όταν υπάρχει διαφορά τάσης, και προκαλεί ηλεκτροπληξία.", filler(4)].join("\n\n");
+    const lookup = async () => ({ titles: ["Ηλεκτρισμός"], text: page });
+    let system = "";
+    let perceive = "";
+    let terms: string[] = [];
+    const model: LlmProvider = {
+      name: "model",
+      embed: llm.embed.bind(llm),
+      generateText: async (req) => {
+        system = req.system;
+        return "Ας το δω.";
+      },
+      generateJson: async (req) => {
+        if (req.prompt.includes("<υλικό>")) return llm.generateJson(req);
+        if (req.prompt.includes("<απάντηση>")) return {};
+        perceive = req.prompt;
+        return { perception: {}, impulses: {}, note: "ρωτά γιατί τον χτυπά το ρεύμα", terms };
+      },
+    };
+    await processTurn({ db, llm: model, lookup, now: at(1) }, u, "Γεια");
+    await processTurn({ db, llm: model, lookup, now: at(1) }, u, "Διάβασε αυτό: https://example.com/ilektrismos");
+
+    // Η αντίληψη ξέρει ποια σελίδα έχει μπροστά της, για να σκεφτεί όρους που ταιριάζουν.
+    await processTurn({ db, llm: model, lookup, now: at(2) }, u, "Ωραία, πάμε παρακάτω.");
+    expect(perceive).toContain("Σελίδες που έχει διαβάσει πρόσφατα");
+    expect(perceive).toContain("ΠΕΡΙΓΡΑΦΗ: Σελίδα με θέμα «Ηλεκτρισμός»");
+
+    // Με τα λόγια του μόνο, η σελίδα δεν δίνει τίποτα.
+    await processTurn({ db, llm: model, lookup, now: at(2) }, u, "γιατί με τινάζει η πρίζα;");
+    expect(system).toContain("Κανένα σημείο της σελίδας δεν ταιριάζει");
+
+    // Με τις έννοιες που κατάλαβε πίσω από την ερώτηση, βρίσκει την παράγραφο.
+    terms = ["ηλεκτρικό ρεύμα", "τάση", "ηλεκτροπληξία", 7 as unknown as string, ""];
+    const found = await processTurn({ db, llm: model, lookup, now: at(2) }, u, "μα γιατί με τινάζει η πρίζα;");
+    expect(system).toContain("διαφορά τάσης, και προκαλεί ηλεκτροπληξία");
+    expect(found.debug.note).toBe("ρωτά γιατί τον χτυπά το ρεύμα · Έννοιες: ηλεκτρικό ρεύμα, τάση, ηλεκτροπληξία");
+  });
+
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {
     const broken: LlmProvider = {
       name: "broken",

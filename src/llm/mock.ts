@@ -88,6 +88,7 @@ export class MockProvider implements LlmProvider {
         wonder: curious ? 30 : 0,
       },
       note: "mock",
+      terms: t.includes("πριζα") ? ["ηλεκτρικό ρεύμα", "τάση", "ηλεκτροπληξία"] : [],
     };
   }
 

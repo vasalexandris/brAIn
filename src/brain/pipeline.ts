@@ -238,6 +238,10 @@ function parseAppraisal(raw: unknown): Appraisal {
     perception: numbers(r.perception, PERCEPTION_KEYS),
     impulses: numbers(r.impulses, INNER_KEYS),
     note: typeof r.note === "string" ? r.note : "",
+    terms: (Array.isArray(r.terms) ? r.terms : [])
+      .filter((t): t is string => typeof t === "string" && t.trim() !== "")
+      .slice(0, 12)
+      .map((t) => t.trim().slice(0, 60)),
   };
 }
 
@@ -447,12 +451,23 @@ export async function processTurn(
   const elapsedMin = state.updatedAt ? minutesBetween(state.updatedAt, now) : 1;
   let values = applyArrival(applyTime(state.values, elapsedMin, time.silenceMin), time.sessionMin);
 
+  // Ό,τι διάβασε πρόσφατα (βλ. παρακάτω). Φορτώνεται εδώ, ώστε η αντίληψη να ξέρει ποιες σελίδες
+  // έχει μπροστά της όταν σκέφτεται τι εννοεί ο συνομιλητής.
+  const read = await repo.recentMaterial(db, user.id, new Date(now.getTime() - MATERIAL_KEEP_MIN * 60000));
+
   // 2. Αντίληψη (και, παράλληλα, το "αποτύπωμα" του μηνύματος για την ανάκληση).
   const [appraisal, cue] = await Promise.all([
     llm
       .generateJson({
         system: PERCEIVE_SYSTEM,
-        prompt: perceivePrompt({ values, impression: state.impression, history: history.slice(-6), message, time }),
+        prompt: perceivePrompt({
+          values,
+          impression: state.impression,
+          history: history.slice(-6),
+          message,
+          time,
+          pages: read.filter((m) => m.full).map((m) => m.text.slice(0, 700)),
+        }),
       })
       .then(parseAppraisal)
       .catch((err): Appraisal => {
@@ -474,11 +489,11 @@ export async function processTurn(
   // Ό,τι διάβασε πρόσφατα. Για μεγάλες σελίδες: η περιγραφή τους, και μόνο τα κομμάτια που αφορούν
   // αυτό που μόλις ειπώθηκε. Η σελίδα μένει στη βάση· στο context μπαίνει ό,τι χρειάζεται τώρα.
   const lastAsked = [...stored].reverse().find((m) => m.role === "user")?.content ?? "";
-  const material = (
-    await repo.recentMaterial(db, user.id, new Date(now.getTime() - MATERIAL_KEEP_MIN * 60000))
-  ).map((m) => {
+  // Ψάχνει στη σελίδα με τα λόγια του συνομιλητή ΚΑΙ με τις έννοιες που κατάλαβε πίσω τους: κάποιος
+  // που ρωτά «γιατί με τινάζει η πρίζα» δεν χρησιμοποιεί καμία λέξη του κειμένου που το εξηγεί.
+  const material = read.map((m) => {
     if (!m.full) return m;
-    const pieces = excerpts(m.full, `${message} ${lastAsked}`);
+    const pieces = excerpts(m.full, [message, lastAsked, ...(appraisal.terms ?? [])].join(" "));
     return {
       ...m,
       text: pieces.length
@@ -739,7 +754,7 @@ export async function processTurn(
     values,
     search,
     debug: {
-      note: appraisal.note ?? "",
+      note: [appraisal.note, appraisal.terms?.length ? `Έννοιες: ${appraisal.terms.join(", ")}` : ""].filter(Boolean).join(" · "),
       recalled: recalled.map((r) => (r.depth === 1 ? `[αχνή] ${gistOf(r.memory)}` : r.memory.content)),
       stored: storedNow,
       impression,

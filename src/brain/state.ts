@@ -16,6 +16,11 @@ export interface Appraisal {
   /** Ώθηση −100…+100 για κάθε εσωτερικό δείκτη. */
   impulses: Record<string, number>;
   note?: string;
+  /**
+   * Οι έννοιες πίσω από τα λόγια του συνομιλητή («πρίζα» → ρεύμα, τάση, ηλεκτροπληξία). Με αυτές,
+   * μαζί με τα ίδια του τα λόγια, ψάχνει μέσα σε όσα έχει διαβάσει.
+   */
+  terms?: string[];
 }
 
 export const clamp = (x: number, lo = 0, hi = 100) => Math.min(hi, Math.max(lo, x));
