@@ -1131,6 +1131,41 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     expect(system).toContain("μπορείς να επιστρέψεις σε κάτι που σκέφτηκες και δεν είπες");
   });
 
+  it("ξέρει πότε μιλήσατε χθες το βράδυ, ακόμη κι όταν ρωτά ένα λεπτό μέσα στη σημερινή κουβέντα", async () => {
+    const u = await createUser(db, { email: "time@x.gr", name: "Βασίλης", passwordHash: "x" });
+    let system = "";
+    let thoughtAsked = "";
+    const model: LlmProvider = {
+      name: "model",
+      embed: llm.embed.bind(llm),
+      generateText: async (req) => {
+        system = req.system;
+        return "Εντάξει.";
+      },
+      generateJson: async () => ({ perception: {}, impulses: {} }),
+    };
+    const t = (iso: string) => new Date(iso);
+    // Παρασκευή 13/11, 20:41–21:12 ώρα Ελλάδας.
+    await processTurn({ db, llm, now: t("2026-11-13T18:41:00Z") }, u, "Καλησπέρα!");
+    await processTurn({ db, llm, now: t("2026-11-13T18:58:00Z") }, u, "Πώς πάει;");
+    await processTurn({ db, llm, now: t("2026-11-13T19:12:00Z") }, u, "Καληνύχτα!");
+    // Σάββατο 14/11, 08:08, και 08:10.
+    await processTurn({ db, llm: model, now: t("2026-11-14T06:08:00Z") }, u, "Καλημέρα");
+    expect(system).toContain("Είχε να σου γράψει περίπου 11 ώρες");
+    await processTurn({ db, llm: model, now: t("2026-11-14T06:10:00Z") }, u, "Πόσος χρόνος πέρασε από τότε που μιλήσαμε;");
+    // Τώρα η κουβέντα είναι ζωντανή, και το «προηγούμενο μήνυμα» είναι πριν από 2 λεπτά — αλλά ξέρει και τη χθεσινή.
+    expect(system).toContain("το προηγούμενο μήνυμά του ήρθε πριν από 2 λεπτά");
+    expect(system).toContain("Η προηγούμενη κουβέντα σας ξεκίνησε χθες το βράδυ (20:41) και τελείωσε στις 21:12");
+    expect(system).toContain("έχουν περάσει περίπου 11 ώρες");
+    expect(system).toContain("Η κουβέντα ξεκίνησε σήμερα το πρωί (08:08)");
+    expect(system).toMatch(/Τώρα: Σάββατο 14 Νοεμβρίου 2026 στις 8:10/);
+
+    // Η σκέψη της ξέρει ότι πρέπει να λάβει υπόψη τον χρόνο.
+    const spy: LlmProvider = { ...model, generateText: async (req) => { thoughtAsked = req.system; return "Εντάξει."; } };
+    await processTurn({ db, llm: spy, now: t("2026-11-14T06:12:00Z") }, u, "Τι ώρα είναι;");
+    expect(thoughtAsked).toContain("Σκέψου και τον χρόνο");
+  });
+
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {
     const broken: LlmProvider = {
       name: "broken",

@@ -5,6 +5,7 @@ import { CATEGORY_LABELS, DIMENSIONS, EMOTION_KEYS, DIMENSION_BY_KEY, INNER_KEYS
 import { MEMORY_KIND_LABELS, gistOf, type Recalled } from "./memory";
 import type { BrainValues } from "./state";
 import type { ChatMessage } from "@/llm/types";
+import { approxSpan, clock, dayPart, when, type Session } from "./clock";
 import { thoughtDirective, type ThinkDepth } from "./thought";
 
 function intensity(v: number): string {
@@ -48,20 +49,44 @@ export function span(min: number): string {
 
 /** Τι ξέρει ο εγκέφαλος για τον χρόνο αυτή τη στιγμή. */
 export interface TimeSense {
+  /** Η τωρινή στιγμή. */
+  now: Date;
   /** Λεπτά από το προηγούμενο μήνυμα του συνομιλητή· null αν είναι το πρώτο του. */
   silenceMin: number | null;
   /** Πόσα λεπτά κρατά ήδη η τωρινή, συνεχόμενη κουβέντα. */
   sessionMin: number;
+  /** Η προηγούμενη κουβέντα (πριν από την τωρινή), με ώρα έναρξης και λήξης· null αν δεν υπάρχει. */
+  previous?: Session | null;
+  /** Πότε ξεκίνησε η τωρινή κουβέντα. */
+  sessionStart?: Date;
 }
 
 export function describeTime(t: TimeSense): string {
-  if (t.silenceMin === null) return "Είναι η πρώτη φορά που σου μιλά.";
-  if (t.silenceMin < 30) {
-    return t.sessionMin >= 5
-      ? `Η κουβέντα είναι ζωντανή: μιλάτε συνεχόμενα εδώ και ${span(t.sessionMin)}. Το προηγούμενο μήνυμά του ήρθε πριν από ${span(t.silenceMin)}.`
-      : `Η κουβέντα είναι ζωντανή: το προηγούμενο μήνυμά του ήρθε πριν από ${span(t.silenceMin)}.`;
+  const lines: string[] = [`Είναι ${dayPart(t.now)}.`];
+  if (t.silenceMin === null) {
+    lines.push("Είναι η πρώτη φορά που σου μιλά.");
+    return lines.join(" ");
   }
-  return `Είχε να σου γράψει ${span(t.silenceMin)}. Μόλις επέστρεψε.`;
+  if (t.silenceMin < 30) {
+    const started = t.sessionStart ? ` Η κουβέντα ξεκίνησε ${when(t.sessionStart, t.now)}.` : "";
+    lines.push(
+      t.sessionMin >= 5
+        ? `Η κουβέντα είναι ζωντανή: μιλάτε συνεχόμενα εδώ και ${span(t.sessionMin)}. Το προηγούμενο μήνυμά του ήρθε πριν από ${span(t.silenceMin)}.${started}`
+        : `Η κουβέντα είναι ζωντανή: το προηγούμενο μήνυμά του ήρθε πριν από ${span(t.silenceMin)}.${started}`,
+    );
+  } else {
+    lines.push(`Είχε να σου γράψει ${approxSpan(t.silenceMin)}. Μόλις επέστρεψε.`);
+  }
+  if (t.previous) {
+    const ago = (t.now.getTime() - t.previous.end.getTime()) / 60000;
+    lines.push(
+      `Η προηγούμενη κουβέντα σας ξεκίνησε ${when(t.previous.start, t.now)} και τελείωσε στις ${clock(t.previous.end)}· από τότε έχουν περάσει ${approxSpan(ago)}.`,
+    );
+    lines.push(
+      "Όταν σε ρωτά «πότε μιλήσαμε τελευταία φορά» ή «πόση ώρα πέρασε από τότε που μιλήσαμε», εννοεί συνήθως την ΠΡΟΗΓΟΥΜΕΝΗ κουβέντα — όχι το προηγούμενο μήνυμα της τωρινής. Απάντησε με μέρα και ώρα και με «περίπου» όταν είναι ώρες ή μέρες, όπως θα το έλεγε κανείς («χθες το βράδυ, γύρω στις 9, πριν από περίπου 11 ώρες»). Αν δεν είναι σαφές ποιο εννοεί, πες και τα δύο.",
+    );
+  }
+  return lines.join(" ");
 }
 
 function age(from: Date, now: Date): string {
