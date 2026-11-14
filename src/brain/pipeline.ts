@@ -26,6 +26,7 @@ import {
 } from "./memory";
 import { DOCUMENT_MIN_CHARS, excerpts } from "./document";
 import { extractThought, thinkingDepth } from "./thought";
+import type { Session } from "./clock";
 import { HEADLINES_QUERY, SOURCES, SOURCE_LABELS, lookup as defaultLookup, type Lookup, type Source } from "./world";
 import {
   PERCEIVE_SYSTEM,
@@ -393,16 +394,22 @@ const minutesBetween = (from: Date, to: Date) => Math.max(0, to.getTime() - from
 const SESSION_GAP_MIN = 30;
 
 /** Η αίσθηση του χρόνου, από τις ώρες των αποθηκευμένων μηνυμάτων. */
-function senseTime(stored: repo.StoredMessage[], now: Date): TimeSense {
+function senseTime(stored: repo.StoredMessage[], now: Date, sessions: Session[] = []): TimeSense {
   const lastUser = [...stored].reverse().find((m) => m.role === "user");
   let sessionStart = now;
   for (let i = stored.length - 1; i >= 0; i--) {
     if (minutesBetween(stored[i].createdAt, sessionStart) > SESSION_GAP_MIN) break;
     sessionStart = stored[i].createdAt;
   }
+  // Η προηγούμενη κουβέντα: η πιο πρόσφατη που δεν είναι η τωρινή. Αν η τελευταία τελείωσε πάνω
+  // από μισή ώρα πριν, η τωρινή μόλις ξεκίνησε και η προηγούμενη είναι εκείνη.
+  const ongoing = sessions[0] && minutesBetween(sessions[0].end, now) <= SESSION_GAP_MIN;
   return {
+    now,
     silenceMin: lastUser ? minutesBetween(lastUser.createdAt, now) : null,
     sessionMin: minutesBetween(sessionStart, now),
+    sessionStart,
+    previous: (ongoing ? sessions[1] : sessions[0]) ?? null,
   };
 }
 
@@ -453,7 +460,7 @@ export async function processTurn(
   }
 
   // 1. Ο χρόνος: ό,τι ένιωθε καταλαγιάζει, η σιωπή αφήνει έλλειψη, και η επιστροφή του κάτι σημαίνει.
-  const time = senseTime(stored, now);
+  const time = senseTime(stored, now, await repo.recentSessions(db, user.id, SESSION_GAP_MIN));
   const elapsedMin = state.updatedAt ? minutesBetween(state.updatedAt, now) : 1;
   let values = applyArrival(applyTime(state.values, elapsedMin, time.silenceMin), time.sessionMin);
 
@@ -838,7 +845,7 @@ export async function pulse(
     }
   }
 
-  const time = senseTime(stored, now);
+  const time = senseTime(stored, now, await repo.recentSessions(db, user.id, SESSION_GAP_MIN));
   const quietMin = minutesBetween(stored[stored.length - 1].createdAt, now);
   // Πόσα δικά της μηνύματα στη σειρά, πέρα από την κανονική απάντηση, έχουν μείνει αναπάντητα.
   let trailing = 0;
@@ -943,7 +950,7 @@ export async function resolveSearch(
     repo.loadBrainState(db, user.id),
     repo.recentMessages(db, user.id, WORKING_MEMORY),
   ]);
-  const time = senseTime(stored, now);
+  const time = senseTime(stored, now, await repo.recentSessions(db, user.id, SESSION_GAP_MIN));
   let values = applyTime(state.values, state.updatedAt ? minutesBetween(state.updatedAt, now) : 1, time.silenceMin);
   const save = () => repo.saveBrainState(db, user.id, { ...state, values, updatedAt: now }, now);
 

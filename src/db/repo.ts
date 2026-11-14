@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { Db } from "./index";
 import type { Memory, MemoryKind } from "@/brain/memory";
 import { normalizeValues, type BrainValues } from "@/brain/state";
+import { sessionsFrom, type Session } from "@/brain/clock";
 
 export interface User {
   id: string;
@@ -396,4 +397,17 @@ export async function silentThoughts(db: Db, userId: string, since: Date): Promi
     [userId, since.toISOString()],
   );
   return { count: rows[0].n, last: rows[0].last ? new Date(rows[0].last) : null };
+}
+
+/**
+ * Οι πρόσφατες κουβέντες (σύνολα μηνυμάτων χωρίς παύση πάνω από `gapMin` λεπτά), πιο πρόσφατη πρώτη.
+ * Βγαίνουν από τη βάση, όχι από τα τελευταία μηνύματα που βλέπει το μοντέλο, ώστε να ξέρει πότε
+ * μιλήσατε ακόμη κι αν έχουν περάσει πολλά μηνύματα από τότε.
+ */
+export async function recentSessions(db: Db, userId: string, gapMin: number, limit = 4): Promise<Session[]> {
+  const rows = await db.query(`SELECT created_at FROM messages WHERE user_id = $1 ORDER BY created_at DESC LIMIT 800`, [userId]);
+  return sessionsFrom(
+    rows.map((r) => new Date(r.created_at)),
+    gapMin,
+  ).slice(0, limit);
 }
