@@ -1114,6 +1114,8 @@ export async function resolveSearch(
   if (!best) return fail();
   const { message, material } = best;
   await repo.saveSearchMaterial(db, search.id, best.overview ?? material.text.slice(0, 6000), best.overview ? material.text : null);
+  // Ό,τι διάβασε πριν από περισσότερες μέρες απ' όσες μένει χρήσιμο φεύγει από τη βάση.
+  await repo.pruneStoredPages(db, user.id, daysAgo(now, PAGE_KEEP_DAYS));
 
   const storedNow: string[] = [];
   const keep = async (m: Reflection["memories"][number], kind: MemoryKind) => {

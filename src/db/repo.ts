@@ -425,3 +425,17 @@ export async function recentSessions(db: Db, userId: string, gapMin: number, lim
     gapMin,
   ).slice(0, limit);
 }
+
+/**
+ * Ξεφορτώνει τις παλιές σελίδες: μετά από όσο μένουν χρήσιμες (βλ. PAGE_KEEP_DAYS στο pipeline), το
+ * πλήρες κείμενό τους και το υλικό της αναζήτησης διαγράφονται. Μένει η εγγραφή (τι ψάχτηκε και πότε)
+ * και, στη μνήμη της, ό,τι έμαθε — σε τρία επίπεδα. Χωρίς αυτό η βάση θα μεγάλωνε για πάντα, με
+ * έως δεκάδες KB ανά σελίδα.
+ */
+export async function pruneStoredPages(db: Db, userId: string, before: Date): Promise<void> {
+  await db.query(
+    `UPDATE searches SET full_text = NULL, material = NULL
+      WHERE user_id = $1 AND created_at < $2 AND (full_text IS NOT NULL OR material IS NOT NULL)`,
+    [userId, before.toISOString()],
+  );
+}
