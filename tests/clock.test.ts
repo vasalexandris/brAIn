@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { approxSpan, calendarDaysAgo, clock, dayPart, sessionsFrom, when } from "@/brain/clock";
+import { approxSpan, calendarDaysAgo, clock, dayPart, sessionsFrom, startOfDay, when } from "@/brain/clock";
 import { describeTime } from "@/brain/prompts";
 
 // Νοέμβριος: η Ελλάδα είναι UTC+2.
@@ -33,6 +33,15 @@ describe("ρολόι", () => {
     expect(approxSpan(11 * 60 + 10)).toBe("περίπου 11 ώρες");
     expect(approxSpan(30 * 60)).toBe("περίπου μία μέρα");
     expect(approxSpan(3 * 24 * 60)).toBe("περίπου 3 μέρες");
+  });
+
+  it("η αρχή της ημέρας είναι τα μεσάνυχτα Ελλάδας, χειμώνα και καλοκαίρι", () => {
+    // Χειμώνας (UTC+2): 00:30 του Σαββάτου και 20:00 της ίδιας μέρας έχουν την ίδια αρχή.
+    expect(startOfDay(at("2026-11-14T22:30:00Z")).toISOString()).toBe("2026-11-14T22:00:00.000Z");
+    expect(startOfDay(at("2026-11-15T17:59:00Z")).toISOString()).toBe("2026-11-14T22:00:00.000Z");
+    expect(startOfDay(at("2026-11-14T21:59:00Z")).toISOString()).toBe("2026-11-13T22:00:00.000Z"); // 23:59 Παρασκευής
+    // Καλοκαίρι (UTC+3).
+    expect(startOfDay(at("2026-07-10T10:00:00Z")).toISOString()).toBe("2026-07-09T21:00:00.000Z");
   });
 
   it("χωρίζει τα μηνύματα σε κουβέντες, πιο πρόσφατη πρώτη", () => {

@@ -8,7 +8,7 @@ import {
   resolveSearch,
 } from "@/brain/pipeline";
 import { createPgliteDb, type Db } from "@/db";
-import { createUser, listMemories, loadBrainState, recentMessages, setAutoNews } from "@/db/repo";
+import { createUser, listMemories, loadBrainState, recentMessages, setAutoNews, setAutoSearch } from "@/db/repo";
 import { MockProvider } from "@/llm/mock";
 import type { LlmProvider } from "@/llm/types";
 
@@ -1164,6 +1164,112 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     const spy: LlmProvider = { ...model, generateText: async (req) => { thoughtAsked = req.system; return "Εντάξει."; } };
     await processTurn({ db, llm: spy, now: t("2026-11-14T06:12:00Z") }, u, "Τι ώρα είναι;");
     expect(thoughtAsked).toContain("Σκέψου και τον χρόνο");
+  });
+
+  it("ψάχνει μόνη της έως 10 φορές την ημέρα· μετά ρωτά, και την επόμενη μέρα ξανά ελεύθερα", async () => {
+    const saved = process.env.AUTO_SEARCHES_PER_DAY;
+    process.env.AUTO_SEARCHES_PER_DAY = "10";
+    try {
+      const u = await createUser(db, { email: "free@x.gr", name: "Βασίλης", passwordHash: "x" });
+      const calls: string[] = [];
+      const lookup = async (source: string, query: string) => {
+        calls.push(`${source}:${query}`);
+        return { titles: ["Τίτλος"], text: "## Τίτλος\nΠεριεχόμενο." };
+      };
+      let system = "";
+      const model: LlmProvider = {
+        name: "model",
+        embed: llm.embed.bind(llm),
+        generateText: async (req) => {
+          system = req.system;
+          return "Ας δω.\n[ΨΑΞΕ web: νέα θέματα]";
+        },
+        generateJson: async (req) =>
+          req.prompt.includes("<υλικό>") ? { found: true, message: "Το διάβασα.", memories: [] } : { perception: {}, impulses: {} },
+      };
+      // Τρίτη 17/11, από τις 08:00 ώρα Ελλάδας (06:00Z).
+      let clock = new Date("2026-11-17T06:00:00Z").getTime();
+      const at = (min: number) => new Date((clock += min * 60000));
+      const ask = (text: string, now: Date) => processTurn({ db, llm: model, lookup, now }, u, text);
+
+      for (let i = 1; i <= 10; i++) {
+        const r = await ask(`Ψάξε κάτι για το θέμα νούμερο ${i}`, at(5));
+        expect(r.search, `αναζήτηση ${i}`).toBeNull();
+        expect(r.extra, `αναζήτηση ${i}`).toBe("Το διάβασα.");
+        expect(r.debug.searchesLeft).toBe(10 - i);
+      }
+      expect(calls).toHaveLength(10);
+
+      // Της είπε ο ίδιος «ψάξε»: αυτό δεν χρειάζεται έγκριση ποτέ. Εδώ ρωτά η ίδια, χωρίς εντολή.
+      expect(system).toContain("ΕΧΕΙΣ ΑΔΕΙΑ να ψάχνεις μόνη σου");
+      const eleventh = await ask("Τι γίνεται με τα νέα του κόσμου;", at(5));
+      expect(system).toContain("περιμένεις την έγκρισή του");
+      expect(system).not.toContain("ΕΧΕΙΣ ΑΔΕΙΑ");
+      expect(eleventh.search).toMatchObject({ source: "web" });
+      expect(eleventh.extra).toBeNull();
+      expect(calls).toHaveLength(10);
+
+      // Με έγκριση του συνομιλητή, ψάχνει και την ενδέκατη.
+      await resolveSearch({ db, llm: model, lookup, now: at(1) }, u, eleventh.search!.id, true);
+      expect(calls).toHaveLength(11);
+
+      // Την επόμενη μέρα (08:00 Ελλάδας), το πλήθος ξαναρχίζει.
+      const nextDay = await ask("Τι γίνεται με τα νέα της ημέρας;", new Date("2026-11-18T06:00:00Z"));
+      expect(nextDay.search).toBeNull();
+      expect(nextDay.extra).toBe("Το διάβασα.");
+      expect(nextDay.debug.searchesLeft).toBe(9);
+      expect(system).toContain("σου μένουν 10 σήμερα");
+    } finally {
+      if (saved === undefined) delete process.env.AUTO_SEARCHES_PER_DAY;
+      else process.env.AUTO_SEARCHES_PER_DAY = saved;
+    }
+  });
+
+  it("η αυτόνομη αναζήτηση κλείνει από τον χρήστη, και μετρά από τα μεσάνυχτα Ελλάδας", async () => {
+    const saved = process.env.AUTO_SEARCHES_PER_DAY;
+    process.env.AUTO_SEARCHES_PER_DAY = "2";
+    try {
+      const u = await createUser(db, { email: "off@x.gr", name: "Βασίλης", passwordHash: "x" });
+      const lookup = async () => ({ titles: ["Τ"], text: "## Τ\nΠεριεχόμενο." });
+      const model: LlmProvider = {
+        name: "model",
+        embed: llm.embed.bind(llm),
+        generateText: async () => "Ας δω.\n[ΨΑΞΕ web: κάτι]",
+        generateJson: async (req) =>
+          req.prompt.includes("<υλικό>") ? { found: true, message: "Το διάβασα.", memories: [] } : { perception: {}, impulses: {} },
+      };
+      const ask = (text: string, iso: string) => processTurn({ db, llm: model, lookup, now: new Date(iso) }, u, text);
+
+      // Ο χρήστης την κλείνει: κάρτα από την πρώτη φορά.
+      await setAutoSearch(db, u.id, false, new Date("2026-11-17T06:00:00Z"));
+      expect((await loadBrainState(db, u.id)).autoSearch).toBe(false);
+      const carded = await ask("Τι γίνεται με τα νέα;", "2026-11-17T06:01:00Z");
+      expect(carded.search).not.toBeNull();
+      await resolveSearch({ db, llm: model, lookup, now: new Date("2026-11-17T06:02:00Z") }, u, carded.search!.id, false);
+
+      // Την ξανανοίγει: τώρα ψάχνει μόνη της.
+      await setAutoSearch(db, u.id, true, new Date("2026-11-17T06:03:00Z"));
+      const free1 = await ask("Και τι άλλο γίνεται;", "2026-11-17T06:20:00Z");
+      expect(free1.extra).toBe("Το διάβασα.");
+      const free2 = await ask("Και κάτι ακόμη;", "2026-11-17T06:40:00Z");
+      expect(free2.extra).toBe("Το διάβασα.");
+      expect(free2.debug.searchesLeft).toBe(0);
+
+      // Έχει φτάσει τις 2: κάρτα. Λίγο μετά τα μεσάνυχτα Ελλάδας (00:30 της 18ης) το πλήθος ξαναρχίζει.
+      const over = await ask("Ένα ακόμη θέμα;", "2026-11-17T20:00:00Z");
+      expect(over.search).not.toBeNull();
+      await resolveSearch({ db, llm: model, lookup, now: new Date("2026-11-17T20:01:00Z") }, u, over.search!.id, false);
+      const afterMidnight = await ask("Καλημέρα, τι νέα;", "2026-11-17T22:30:00Z");
+      expect(afterMidnight.extra).toBe("Το διάβασα.");
+      expect(afterMidnight.debug.searchesLeft).toBe(1);
+
+      // Το 0 σημαίνει πάντα έγκριση.
+      process.env.AUTO_SEARCHES_PER_DAY = "0";
+      expect((await ask("Και τώρα;", "2026-11-18T10:00:00Z")).search).not.toBeNull();
+    } finally {
+      if (saved === undefined) delete process.env.AUTO_SEARCHES_PER_DAY;
+      else process.env.AUTO_SEARCHES_PER_DAY = saved;
+    }
   });
 
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {

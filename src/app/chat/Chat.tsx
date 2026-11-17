@@ -17,6 +17,7 @@ interface Debug {
   topics?: string[];
   hypotheses?: string[];
   thought?: string;
+  searchesLeft?: number;
 }
 interface Proposal {
   id: string;
@@ -27,6 +28,9 @@ interface Props {
   /** Η έκδοση του κώδικα με την οποία φορτώθηκε η σελίδα. */
   build: string;
   initialAutoNews: boolean;
+  initialAutoSearch: boolean;
+  /** Πόσες αναζητήσεις την ημέρα μπορεί να κάνει μόνη της. */
+  dailyAutoSearches: number;
   initialSearch: Proposal | null;
   initialMessages: Msg[];
   initialValues: Record<string, number>;
@@ -37,7 +41,7 @@ interface Props {
   admin: boolean;
 }
 
-export function Chat({ initialMessages, initialValues, initialImpression, initialSelfImage, initialSearch, build, initialAutoNews, dimensions, categories, admin }: Props) {
+export function Chat({ initialMessages, initialValues, initialImpression, initialSelfImage, initialSearch, build, initialAutoNews, initialAutoSearch, dailyAutoSearches, dimensions, categories, admin }: Props) {
   const [messages, setMessages] = useState(initialMessages);
   const [values, setValues] = useState(initialValues);
   const [debug, setDebug] = useState<Debug>({
@@ -54,6 +58,20 @@ export function Chat({ initialMessages, initialValues, initialImpression, initia
   const [inspect, setInspect] = useState(false);
   const [proposal, setProposal] = useState<Proposal | null>(initialSearch);
   const [autoNews, setAutoNews] = useState(initialAutoNews);
+  const [autoSearch, setAutoSearch] = useState(initialAutoSearch);
+
+  async function toggleAutoSearch(on: boolean) {
+    setAutoSearch(on);
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ autoSearch: on }),
+    }).catch(() => null);
+    if (!res?.ok) {
+      setAutoSearch(!on);
+      setError("Η ρύθμιση δεν αποθηκεύτηκε. Δοκίμασε ξανά.");
+    }
+  }
 
   async function toggleAutoNews(on: boolean) {
     setAutoNews(on);
@@ -277,6 +295,13 @@ export function Chat({ initialMessages, initialValues, initialImpression, initia
           <label className="permit">
             <input type="checkbox" checked={autoNews} onChange={(e) => toggleAutoNews(e.target.checked)} />
             <span>Να διαβάζει μόνη της τις ειδήσεις της ημέρας, μία φορά τη μέρα</span>
+          </label>
+          <label className="permit">
+            <input type="checkbox" checked={autoSearch} onChange={(e) => toggleAutoSearch(e.target.checked)} />
+            <span>
+              Να ψάχνει μόνη της, χωρίς να ρωτά, έως {dailyAutoSearches} φορές τη μέρα
+              {typeof debug.searchesLeft === "number" && autoSearch ? ` (σήμερα έχει ακόμη ${debug.searchesLeft})` : ""}
+            </span>
           </label>
           <h4>Τι κατάλαβε</h4>
           <p>{debug.note || "—"}</p>

@@ -75,3 +75,14 @@ export function sessionsFrom(timestamps: Date[], gapMin: number): Session[] {
   }
   return out.reverse();
 }
+
+/** Η αρχή της τρέχουσας ημέρας στην Ελλάδα (μεσάνυχτα), ως στιγμή. */
+export function startOfDay(now: Date): Date {
+  const [y, m, d] = dayKey(now).split("-").map(Number);
+  // Τα μεσάνυχτα της Ελλάδας είναι 21:00 ή 22:00 της προηγούμενης μέρας σε UTC· δοκιμάζουμε και τα δύο.
+  for (const offset of [2, 3]) {
+    const candidate = new Date(Date.UTC(y, m - 1, d, -offset));
+    if (dayKey(candidate) === dayKey(now) && dayKey(new Date(candidate.getTime() - 1)) !== dayKey(now)) return candidate;
+  }
+  return new Date(Date.UTC(y, m - 1, d, -2));
+}

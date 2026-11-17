@@ -26,7 +26,7 @@ import {
 } from "./memory";
 import { DOCUMENT_MIN_CHARS, excerpts } from "./document";
 import { extractThought, thinkingDepth } from "./thought";
-import type { Session } from "./clock";
+import { startOfDay, type Session } from "./clock";
 import { HEADLINES_QUERY, SOURCES, SOURCE_LABELS, lookup as defaultLookup, type Lookup, type Source } from "./world";
 import {
   PERCEIVE_SYSTEM,
@@ -71,6 +71,14 @@ const DAILY_INITIATIVE_LIMIT = 6;
 const DAILY_SILENT_LIMIT = 6;
 const SILENT_COOLDOWN_MIN = 60;
 export const DAILY_SEARCH_LIMIT = 20;
+/**
+ * Πόσες αναζητήσεις την ημέρα (ημερολογιακή μέρα, ώρα Ελλάδας) μπορεί να κάνει μόνη της, χωρίς
+ * έγκριση, όταν ο συνομιλητής της το έχει επιτρέψει. Μετά από αυτές ρωτά κάθε φορά, έως το συνολικό όριο.
+ */
+export const autoSearchesPerDay = () => {
+  const n = Number(process.env.AUTO_SEARCHES_PER_DAY ?? 10);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 10;
+};
 /** Μετά από μια πρόταση αναζήτησης (όπως κι αν κατέληξε) δεν ξαναπροτείνει για τόσα λεπτά. */
 const SEARCH_COOLDOWN_MIN = 10;
 /** Κάτω από τόση όρεξη «να εμβαθύνω» δεν ζητά να ψάξει. */
@@ -221,6 +229,8 @@ export interface TurnResult {
     topics?: string[];
     /** Τι σκέφτηκε ιδιωτικά πριν απαντήσει. */
     thought?: string;
+    /** Πόσες αναζητήσεις μπορεί ακόμη να κάνει σήμερα χωρίς έγκριση. */
+    searchesLeft?: number;
     /** Οι ανεπιβεβαίωτες υποθέσεις της. */
     hypotheses?: string[];
   };
@@ -517,6 +527,9 @@ export async function processTurn(
   // Σελίδες που έχει ήδη διαβάσει μπορεί να τις ξανανοίξει, ακόμη κι αν η διεύθυνση δεν είναι πια στην κουβέντα.
   const knownPages = await repo.readPageUrls(db, user.id, daysAgo(now, PAGE_KEEP_DAYS));
   const recalled = recall(rest, cue, valence(values), now);
+  // Πόσες αναζητήσεις της μένουν σήμερα χωρίς να ρωτήσει: ό,τι έψαξε από τα μεσάνυχτα μετρά.
+  const searchedToday = await repo.countSearchesSince(db, user.id, startOfDay(now));
+  const freeSearches = state.autoSearch === false ? 0 : Math.max(0, autoSearchesPerDay() - searchedToday);
 
   // 4. Απόκριση, με εσωτερική σκέψη πρώτα όσο ζητά η στιγμή. Αν αποτύχει, ο γύρος ακυρώνεται.
   const depth = thinkingDepth(values, { message, hasMaterial: material.length > 0 });
@@ -540,6 +553,7 @@ export async function processTurn(
         material,
         depth: d,
         thoughts: priorThoughts,
+        freeSearches,
       }),
       messages: [...history, { role: "user", content: message }],
       temperature: replyTemperature(values),
@@ -640,7 +654,7 @@ export async function processTurn(
   if (early) [search, outcome] = await propose(early, false);
 
   const FALLBACK: Record<Outcome, string> = {
-    created: commanded ? "Το ψάχνω." : "Να το ψάξω;",
+    created: commanded || freeSearches > 0 ? "Το ψάχνω." : "Να το ψάξω;",
     pending: "Σου έχω ήδη ζητήσει να ψάξω κάτι. Πες μου αν θες να προχωρήσω.",
     limit: "Έχω ψάξει αρκετά για σήμερα. Ας το δούμε αύριο.",
     declined: "Εντάξει, το αφήνω για τώρα.",
@@ -761,7 +775,10 @@ export async function processTurn(
   await repo.saveBrainState(db, user.id, { values, impression, selfImage, turnCount: state.turnCount + 1, updatedAt: now }, now);
 
   let extra: string | null = null;
-  if (search && commanded) {
+  // Ψάχνει αμέσως, χωρίς κάρτα, όταν της το ζήτησε ρητά ο συνομιλητής ή όταν έχει ακόμη αναζητήσεις
+  // που μπορεί να κάνει μόνη της σήμερα. Αλλιώς μένει η κάρτα και περιμένει έγκριση.
+  const runsNow = Boolean(search && (commanded || freeSearches > 0));
+  if (search && runsNow) {
     const found = await resolveSearch({ ...deps, now: new Date(now.getTime() + 2) }, user, search.id, true);
     if (found) {
       extra = found.message;
@@ -783,6 +800,7 @@ export async function processTurn(
       impression,
       selfImage,
       thought: spokenOut.thought,
+      searchesLeft: runsNow ? Math.max(0, freeSearches - 1) : freeSearches,
       lessons: [...lessons, ...newLessons].slice(-ACTIVE_LESSONS),
       hypotheses: [
         ...hypotheses.filter((h, i) => !reflection.verdicts.some((v) => v.n === i + 1)).map((h) => h.content),
