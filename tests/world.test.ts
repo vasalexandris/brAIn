@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { assertPublicUrl, decodeEntities, htmlToText, isPrivateAddress, lookup, parseRss, readPage } from "@/brain/world";
+import { assertPublicUrl, decodeEntities, extractLinks, htmlToText, isPrivateAddress, lookup, parseRss, readPage } from "@/brain/world";
 
 const RSS = `<?xml version="1.0"?><rss><channel><title>x</title>
 <item><title>Σεισμός 4,2 &amp; μετασεισμοί</title><link>http://a</link><description><![CDATA[Έγινε <b>αισθητός</b> στην Αθήνα.]]></description><pubDate>Mon, 09 Nov 2026 23:31:00 GMT</pubDate><News:Source>ert.gr</News:Source></item>
@@ -56,6 +56,39 @@ describe("παράθυρο στον κόσμο", () => {
       expect(page.title).toBe("Ο τίτλος & κάτι");
       expect(page.text.startsWith("Επικεφαλίδα\nΠρώτη παράγραφος με έμφαση .\nΔεύτερη.")).toBe(true);
       expect(page.text).not.toMatch(/Μενού|alert|Υποσέλιδο|<|p\{\}/);
+    });
+
+    it("βγάζει τους συνδέσμους της σελίδας: ουσιαστικό κείμενο, πλήρεις διευθύνσεις, χωρίς διπλότυπα και σκουπίδια", () => {
+      const html = `<html><body>
+        <nav><a href="/menu">Μενού πλοήγησης της σελίδας</a></nav>
+        <main>${"<p>Κείμενο της σελίδας για να έχει μήκος η κύρια περιοχή.</p>".repeat(12)}
+        <a href="/kosmos/norvigia">Η ανατροπή της Νορβηγίας &amp; η Ουκρανία</a>
+        <a href="/kosmos/norvigia">Νορβηγία</a>
+        <a href="https://other.example.org/arthro?x=1#sxolia"><span>Άρθρο σε άλλο site</span> με μεγάλο τίτλο</a>
+        <a href="/kosmos/norvigia?ref=2" title="x">Η ανατροπή της Νορβηγίας &amp; η Ουκρανία</a>
+        <a href="#top">Επιστροφή στην κορυφή της σελίδας</a>
+        <a href="mailto:a@b.gr">Στείλε μας email τώρα</a>
+        <a href="javascript:void(0)">Κάνε κάτι με javascript</a>
+        <a href="/eikona.jpg">Μια φωτογραφία με μεγάλη λεζάντα</a>
+        <a href="/arxiki">Αρχική</a>
+        <a href="/ellada/seismos" class="big">Σεισμός 4,2 Ρίχτερ στην Κρήτη</a>
+        </main></body></html>`;
+      expect(extractLinks(html, new URL("https://news.example.gr/"))).toEqual([
+        { text: "Η ανατροπή της Νορβηγίας & η Ουκρανία", url: "https://news.example.gr/kosmos/norvigia" },
+        { text: "Άρθρο σε άλλο site με μεγάλο τίτλο", url: "https://other.example.org/arthro?x=1" },
+        { text: "Η ανατροπή της Νορβηγίας & η Ουκρανία", url: "https://news.example.gr/kosmos/norvigia?ref=2" },
+        { text: "Σεισμός 4,2 Ρίχτερ στην Κρήτη", url: "https://news.example.gr/ellada/seismos" },
+      ]);
+    });
+
+    it("η σελίδα που διαβάζεται κρατά τους συνδέσμους στο τέλος, ακόμη κι όταν το κείμενο κόβεται", async () => {
+      const long = "<p>" + "λέξη ".repeat(20000) + "</p>";
+      const html = `<html><head><title>Αρχική</title></head><body><main>${long}<a href="/τελευταίο-άρθρο">Το τελευταίο άρθρο της σελίδας</a></main></body></html>`;
+      vi.stubGlobal("fetch", async () => new Response(html, { headers: { "content-type": "text/html" } }));
+      const page = await readPage("https://example.com/", pub);
+      expect(page.text.length).toBeLessThanOrEqual(60_000);
+      expect(page.text).toContain("## Σύνδεσμοι της σελίδας");
+      expect(page.text.trimEnd().endsWith("→ https://example.com/%CF%84%CE%B5%CE%BB%CE%B5%CF%85%CF%84%CE%B1%CE%AF%CE%BF-%CE%AC%CF%81%CE%B8%CF%81%CE%BF")).toBe(true);
     });
 
     it("αρνείται ό,τι δεν είναι δημόσια ιστοσελίδα", async () => {

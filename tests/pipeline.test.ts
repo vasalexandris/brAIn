@@ -838,8 +838,9 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     await processTurn({ db, llm: model, lookup, now: at(15) }, u, "Ψάξε τις ειδήσεις της ημέρας");
     text = "Θέλω να διαβάσω ολόκληρο το άρθρο.\n[ΑΝΟΙΞΕ: https://www.ertnews.gr/arthro-1/]";
     const fromMaterial = await processTurn({ db, llm: model, lookup, now: at(2) }, u, "Τι λέει αναλυτικά το πρώτο;");
-    expect(fromMaterial.search).toMatchObject({ source: "page", sourceLabel: "ιστοσελίδα", query: "https://www.ertnews.gr/arthro-1/" });
-    await resolveSearch({ db, llm: model, lookup, now: at(1) }, u, fromMaterial.search!.id, true);
+    // Ο συνομιλητής ζητά να δει το άρθρο και η απάντηση δείχνει ποιο: ανοίγει αμέσως, χωρίς κάρτα.
+    expect(fromMaterial.search).toBeNull();
+    expect(fromMaterial.extra).toBe("Το διάβασα.");
     expect(calls[calls.length - 1]).toBe("page:https://www.ertnews.gr/arthro-1/");
   });
 
@@ -1270,6 +1271,69 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
       if (saved === undefined) delete process.env.AUTO_SEARCHES_PER_DAY;
       else process.env.AUTO_SEARCHES_PER_DAY = saved;
     }
+  });
+
+  it("βλέπει τους συνδέσμους μιας σελίδας και ανοίγει όποιον της ζητήσει ο συνομιλητής", async () => {
+    const u = await createUser(db, { email: "links@x.gr", name: "Βασίλης", passwordHash: "x" });
+    let clock = new Date("2026-11-18T08:00:00Z").getTime();
+    const at = (min: number) => new Date((clock += min * 60000));
+    const filler = (n: number) => `Τίτλος ειδήσεων ${n}: γενικά λόγια για την επικαιρότητα. `.repeat(60);
+    const home =
+      "## Πρώτο Θέμα\nexample.gr\n" +
+      [filler(1), filler(2), filler(3)].join("\n\n") +
+      "\n\n## Σύνδεσμοι της σελίδας\n" +
+      [
+        "- Μπαρτζώκας για τον Βεζένκοφ μετά τη νίκη → https://example.gr/sport/bartzokas",
+        "- Η ανατροπή της Νορβηγίας και τι σημαίνει για την Ουκρανία → https://example.gr/kosmos/norvigia-anatropi",
+        "- Οι καιρικές προβλέψεις για το Σαββατοκύριακο → https://example.gr/kairos/savvatokyriako",
+      ].join("\n");
+    const articles: Record<string, string> = {
+      "https://example.gr/kosmos/norvigia-anatropi": "## Η ανατροπή της Νορβηγίας\nexample.gr\nΤο άρθρο γράφει ότι η Ουκρανία κέρδισε νέα στήριξη.",
+    };
+    const calls: string[] = [];
+    const lookup = async (source: string, query: string) => {
+      calls.push(`${source}:${query}`);
+      return { titles: ["Σελίδα"], text: articles[query] ?? home };
+    };
+    let system = "";
+    let text = "Ας δω.";
+    const model: LlmProvider = {
+      name: "model",
+      embed: llm.embed.bind(llm),
+      generateText: async (req) => {
+        system = req.system;
+        return text;
+      },
+      generateJson: async (req) =>
+        req.prompt.includes("<υλικό>")
+          ? { found: true, message: req.prompt.includes("κέρδισε νέα στήριξη") ? "Το άρθρο λέει για την Ουκρανία." : "Διάβασα την κεντρική σελίδα.", summary: "Κεντρική σελίδα ειδήσεων.", outline: ["Αθλητικά", "Κόσμος"], memories: [] }
+          : { perception: {}, impulses: {} },
+    };
+
+    await processTurn({ db, llm: model, lookup, now: at(1) }, u, "Γεια");
+    // Η πρώτη ανάγνωση βλέπει τους συνδέσμους, και οι σύνδεσμοι μένουν στην αποθηκευμένη σελίδα.
+    const first = await processTurn({ db, llm: model, lookup, now: at(1) }, u, "Διάβασε αυτό: https://example.gr/");
+    expect(first.extra).toBe("Διάβασα την κεντρική σελίδα.");
+    const [row] = await db.query(`SELECT full_text FROM searches WHERE user_id = $1 AND source = 'page'`, [u.id]);
+    expect(row.full_text).toContain("→ https://example.gr/kosmos/norvigia-anatropi");
+
+    // «Άνοιξε το άρθρο για τη Νορβηγία»: στο prompt μπαίνει το κομμάτι με τον σχετικό σύνδεσμο, και ο
+    // σύνδεσμος θεωρείται γνωστός γιατί τον είδε. Ανοίγει αμέσως, χωρίς κάρτα.
+    text = "Το βλέπω, θα το ανοίξω.\n[ΑΝΟΙΞΕ: https://example.gr/kosmos/norvigia-anatropi]";
+    const opened = await processTurn({ db, llm: model, lookup, now: at(2) }, u, "Άνοιξε το άρθρο για την ανατροπή της Νορβηγίας");
+    expect(system).toContain("→ https://example.gr/kosmos/norvigia-anatropi");
+    expect(system).toContain("Μη λες ότι δεν μπορείς να ανοίξεις έναν σύνδεσμο");
+    expect(opened.reply).toBe("Το βλέπω, θα το ανοίξω.");
+    expect(opened.search).toBeNull();
+    expect(opened.extra).toBe("Το άρθρο λέει για την Ουκρανία.");
+    expect(calls[calls.length - 1]).toBe("page:https://example.gr/kosmos/norvigia-anatropi");
+
+    // Διεύθυνση που ΔΕΝ υπάρχει στη σελίδα, ό,τι κι αν ζητηθεί, δεν ανοίγει.
+    text = "Θα το δω.\n[ΑΝΟΙΞΕ: https://example.gr/kosmos/den-yparxei]";
+    const invented = await processTurn({ db, llm: model, lookup, now: at(2) }, u, "Άνοιξε και το άρθρο για τον πόλεμο");
+    expect(invented.search).toBeNull();
+    expect(invented.extra).toBeNull();
+    expect(calls.filter((c) => c.includes("den-yparxei"))).toEqual([]);
   });
 
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {
