@@ -190,6 +190,49 @@ export function htmlToText(html: string): { title: string; text: string } {
   return { title, text };
 }
 
+/** Καθαρίζει το HTML από ό,τι δεν είναι περιεχόμενο (σενάρια, μενού, υποσέλιδα) και επιλέγει το κυρίως μέρος. */
+function mainBody(html: string): string {
+  const body = html
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<(script|style|noscript|svg|nav|footer|header|form|aside|iframe)\b[\s\S]*?<\/\1>/gi, " ");
+  const main = /<article\b[\s\S]*<\/article>/i.exec(body) ?? /<main\b[\s\S]*<\/main>/i.exec(body);
+  return main && main[0].length > 400 ? main[0] : body;
+}
+
+const MAX_LINKS = 60;
+
+/**
+ * Οι σύνδεσμοι μιας σελίδας (κείμενο και πλήρης διεύθυνση), με τη σειρά που εμφανίζονται. Κρατιούνται
+ * μόνο όσοι έχουν ουσιαστικό κείμενο (τίτλοι άρθρων, όχι «Αρχική» ή εικονίδια), χωρίς διπλότυπα.
+ * Έτσι ο εγκέφαλος βλέπει όχι μόνο τι γράφει μια σελίδα αλλά και πού μπορεί να πάει από εκεί.
+ */
+export function extractLinks(html: string, base: URL): { text: string; url: string }[] {
+  const found = new Map<string, string>();
+  const anchors = /<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')[^>]*>([\s\S]*?)<\/a>/gi;
+  for (const m of mainBody(html).matchAll(anchors)) {
+    const href = decodeEntities((m[1] ?? m[2] ?? "").trim());
+    if (!href || href.startsWith("#") || /^(mailto|tel|javascript|data):/i.test(href)) continue;
+    const label = decodeEntities(m[3].replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+    if (label.length < 12) continue;
+    let target: URL;
+    try {
+      target = new URL(href, base);
+    } catch {
+      continue;
+    }
+    if (target.protocol !== "https:" && target.protocol !== "http:") continue;
+    if (/\.(jpe?g|png|gif|webp|svg|css|js|ico|zip|mp[34])$/i.test(target.pathname)) continue;
+    target.hash = "";
+    const url = target.toString();
+    if (url === base.toString()) continue;
+    // Αν ο ίδιος σύνδεσμος εμφανίζεται πολλές φορές, κρατιέται το πιο περιγραφικό κείμενο.
+    if (!found.has(url) || label.length > found.get(url)!.length) found.set(url, label.slice(0, 120));
+  }
+  return [...found].slice(0, MAX_LINKS).map(([url, text]) => ({ text, url }));
+}
+
+export const LINKS_HEADING = "## Σύνδεσμοι της σελίδας";
+
 const MAX_PAGE_BYTES = 2_000_000;
 /** Μια σελίδα κρατιέται ολόκληρη (ως αυτό το όριο)· το πόσο θα δει το μοντέλο το ορίζει ο καλών. */
 export const MAX_PAGE_CHARS = 60_000;
@@ -214,8 +257,13 @@ export async function readPage(raw: string, resolve: Resolve = resolveDns): Prom
     if (!/text\/html|application\/xhtml|text\/plain/i.test(type)) throw new Error(`Δεν είναι σελίδα κειμένου (${type || "άγνωστος τύπος"})`);
     if (Number(res.headers.get("content-length") ?? 0) > MAX_PAGE_BYTES) throw new Error("Πολύ μεγάλη σελίδα");
     const raw = (await res.text()).slice(0, MAX_PAGE_BYTES);
-    const page = /text\/plain/i.test(type) ? { title: "", text: raw.trim() } : htmlToText(raw);
-    return { titles: [page.title || url.host], text: `## ${page.title || url.host}\n${url.host}\n${page.text}`.slice(0, MAX_PAGE_CHARS) };
+    const isHtml = !/text\/plain/i.test(type);
+    const page = isHtml ? htmlToText(raw) : { title: "", text: raw.trim() };
+    const links = isHtml ? extractLinks(raw, url) : [];
+    // Οι σύνδεσμοι μπαίνουν στο τέλος και δεν κόβονται ποτέ από το όριο μήκους του κειμένου.
+    const tail = links.length ? `\n\n${LINKS_HEADING}\n${links.map((l) => `- ${l.text} → ${l.url}`).join("\n")}` : "";
+    const head = `## ${page.title || url.host}\n${url.host}\n${page.text}`.slice(0, Math.max(2000, MAX_PAGE_CHARS - tail.length));
+    return { titles: [page.title || url.host], text: head + tail };
   }
   throw new Error("Πάρα πολλές ανακατευθύνσεις");
 }

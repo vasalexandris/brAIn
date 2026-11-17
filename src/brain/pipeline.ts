@@ -332,7 +332,7 @@ const SEARCH_INTENT = /ψαξ|ψαχν|αναζητ|βρες (μου|το|τα|�
 /** …ή ζητά ρητά να ΜΗΝ ψάξει. */
 const NO_SEARCH = /(μην?|δεν θελω να|οχι να|σταματα να) .{0,12}(ψαξ|ψαχν)/;
 /** Η ίδια λέει ότι ψάχνει ή ότι θέλει να ψάξει. */
-const SAYS_SEARCHING = /ψαξω|ψαχνω|αναζητησω/;
+const SAYS_SEARCHING = /ψαξω|ψαχνω|αναζητησω|ανοιξω|ανοιγω/;
 
 const AFTER = "(?![a-zα-ω])";
 /** Ο συνομιλητής λέει «ναι» σε πρόταση αναζήτησης που εκκρεμεί. */
@@ -593,9 +593,12 @@ export async function processTurn(
   // είναι ήδη η άδεια: θα ψάξει αμέσως, χωρίς κάρτα.
   const lastOwn = [...stored].reverse().find((m) => m.role === "assistant");
   const offered = lastOwn ? SAYS_SEARCHING.test(plain(lastOwn.content)) : false;
+  // «Άνοιξε το άρθρο για τη Νορβηγία»: ο συνομιλητής ζητά ρητά να διαβαστεί κάτι, και η απάντησή της
+  // δείχνει ποιον σύνδεσμο εννοεί. Είναι εντολή, όπως το «ψάξε».
+  const opensLink = marked.request?.source === "page" && READ_INTENT.test(said);
   const commanded =
     !NO_SEARCH.test(said) &&
-    (asksToRead || SEARCH_INTENT.test(said) || (offered && said.length <= 80 && AFFIRM.test(said)));
+    (asksToRead || opensLink || SEARCH_INTENT.test(said) || (offered && said.length <= 80 && AFFIRM.test(said)));
   const userAsked = commanded || NEWS_INTENT.test(said);
 
   /**
