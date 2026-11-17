@@ -8,7 +8,17 @@ import {
   resolveSearch,
 } from "@/brain/pipeline";
 import { createPgliteDb, type Db } from "@/db";
-import { createUser, listMemories, loadBrainState, recentMessages, setAutoNews, setAutoSearch } from "@/db/repo";
+import {
+  createSearch,
+  createUser,
+  listMemories,
+  loadBrainState,
+  pruneStoredPages,
+  recentMessages,
+  saveSearchMaterial,
+  setAutoNews,
+  setAutoSearch,
+} from "@/db/repo";
 import { MockProvider } from "@/llm/mock";
 import type { LlmProvider } from "@/llm/types";
 
@@ -1334,6 +1344,22 @@ describe("ένας γύρος συζήτησης (ενσωματωμένη βά�
     expect(invented.search).toBeNull();
     expect(invented.extra).toBeNull();
     expect(calls.filter((c) => c.includes("den-yparxei"))).toEqual([]);
+  });
+
+  it("οι παλιές σελίδες φεύγουν από τη βάση· μένουν η εγγραφή και όσα έμαθε", async () => {
+    const u = await createUser(db, { email: "prune@x.gr", name: "Βασίλης", passwordHash: "x" });
+    const day = (n: number) => new Date(new Date("2026-11-18T10:00:00Z").getTime() - n * 24 * 60 * 60 * 1000);
+    const old = await createSearch(db, u.id, "page", "https://example.com/palia", day(10));
+    const fresh = await createSearch(db, u.id, "page", "https://example.com/nea", day(1));
+    await saveSearchMaterial(db, old.id, "περιγραφή", "ΠΛΗΡΕΣ ΚΕΙΜΕΝΟ ".repeat(500));
+    await saveSearchMaterial(db, fresh.id, "περιγραφή", "ΠΛΗΡΕΣ ΚΕΙΜΕΝΟ ".repeat(500));
+    await db.query(`UPDATE searches SET status = 'done' WHERE user_id = $1`, [u.id]);
+
+    await pruneStoredPages(db, u.id, day(7));
+    const rows = await db.query(`SELECT query, material, full_text, status FROM searches WHERE user_id = $1 ORDER BY created_at`, [u.id]);
+    expect(rows[0]).toMatchObject({ query: "https://example.com/palia", material: null, full_text: null, status: "done" });
+    expect(rows[1].full_text).toContain("ΠΛΗΡΕΣ ΚΕΙΜΕΝΟ");
+    expect(rows[1].material).toBe("περιγραφή");
   });
 
   it("αντέχει όταν η αντίληψη ή ο αναστοχασμός επιστρέψουν σκουπίδια", async () => {
