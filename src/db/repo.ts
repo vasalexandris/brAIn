@@ -22,6 +22,8 @@ export interface BrainState {
   selfImage: string;
   /** Έχει μόνιμη άδεια να διαβάζει τους τίτλους της ημέρας. */
   autoNews?: boolean;
+  /** Μπορεί να ψάχνει μόνη της, μέχρι το ημερήσιο πλήθος αναζητήσεων χωρίς έγκριση. */
+  autoSearch?: boolean;
   turnCount: number;
   updatedAt: Date | null;
 }
@@ -75,13 +77,16 @@ export async function setUserStatus(db: Db, id: string, status: UserStatus): Pro
 
 export async function loadBrainState(db: Db, userId: string): Promise<BrainState> {
   const rows = await db.query(`SELECT * FROM brain_states WHERE user_id = $1`, [userId]);
-  if (!rows.length) return { values: normalizeValues(null), impression: "", selfImage: "", turnCount: 0, updatedAt: null };
+  if (!rows.length) {
+    return { values: normalizeValues(null), impression: "", selfImage: "", autoNews: false, autoSearch: true, turnCount: 0, updatedAt: null };
+  }
   const r = rows[0];
   return {
     values: normalizeValues(r.dims),
     impression: r.impression,
     selfImage: r.self_image,
     autoNews: r.auto_news === true,
+    autoSearch: r.auto_search !== false,
     turnCount: r.turn_count,
     updatedAt: new Date(r.updated_at),
   };
@@ -345,6 +350,15 @@ export async function setAutoNews(db: Db, userId: string, on: boolean, now: Date
   await db.query(
     `INSERT INTO brain_states (user_id, dims, updated_at, auto_news) VALUES ($1, $2::text::jsonb, $3, $4)
      ON CONFLICT (user_id) DO UPDATE SET auto_news = EXCLUDED.auto_news`,
+    [userId, JSON.stringify(normalizeValues(null)), now.toISOString(), on],
+  );
+}
+
+/** Δίνει ή παίρνει πίσω την άδεια να ψάχνει μόνη της (μέχρι το ημερήσιο πλήθος αναζητήσεων χωρίς έγκριση). */
+export async function setAutoSearch(db: Db, userId: string, on: boolean, now: Date): Promise<void> {
+  await db.query(
+    `INSERT INTO brain_states (user_id, dims, updated_at, auto_search) VALUES ($1, $2::text::jsonb, $3, $4)
+     ON CONFLICT (user_id) DO UPDATE SET auto_search = EXCLUDED.auto_search`,
     [userId, JSON.stringify(normalizeValues(null)), now.toISOString(), on],
   );
 }

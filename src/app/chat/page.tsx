@@ -3,7 +3,7 @@ import { isAdmin, isApproved } from "@/auth/access";
 import { currentUser } from "@/auth/session";
 import { CATEGORY_LABELS, DIMENSIONS } from "@/brain/dimensions";
 import { getDb } from "@/db";
-import { toProposal } from "@/brain/pipeline";
+import { autoSearchesPerDay, toProposal } from "@/brain/pipeline";
 import { latestSearch, loadBrainState, recentMessages } from "@/db/repo";
 import { BUILD } from "@/build";
 import { Chat } from "./Chat";
@@ -29,6 +29,8 @@ export default async function ChatPage() {
       initialSelfImage={state.selfImage}
       build={BUILD}
       initialAutoNews={state.autoNews === true}
+      initialAutoSearch={state.autoSearch !== false}
+      dailyAutoSearches={autoSearchesPerDay()}
       initialSearch={search?.status === "pending" ? toProposal(search) : null}
       dimensions={DIMENSIONS.map(({ key, label, category }) => ({ key, label, category }))}
       categories={CATEGORY_LABELS}

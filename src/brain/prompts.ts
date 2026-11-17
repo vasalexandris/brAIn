@@ -163,7 +163,7 @@ export const ASK_THRESHOLD = 55;
  * Οδηγία για τη συγκεκριμένη απάντηση, υπολογισμένη από τις παρορμήσεις. Μπαίνει τελευταία στο
  * prompt, γιατί οι γενικοί κανόνες («ρώτα μόνο όταν…») αποδείχθηκε ότι αγνοούνται στην πράξη.
  */
-export function directive(values: BrainValues, depth: ThinkDepth = 0): string {
+export function directive(values: BrainValues, depth: ThinkDepth = 0, freeSearches = 0): string {
   const mayAsk = values.u_ask >= ASK_THRESHOLD;
   const top = URGE_KEYS.filter((k) => k !== "u_ask" && values[k] >= 30)
     .sort((a, b) => values[b] - values[a])
@@ -183,7 +183,11 @@ export function directive(values: BrainValues, depth: ThinkDepth = 0): string {
   [ΨΑΞΕ web: θέμα]  — για οτιδήποτε συγκεκριμένο ή πρόσφατο: αποτελέσματα, τιμές, γεγονότα, πρόσωπα
   [ΨΑΞΕ wikipedia: θέμα]  — για γενική γνώση: έννοιες, ιστορία, επιστήμη
   [ΑΝΟΙΞΕ: διεύθυνση]  — για να διαβάσεις μια συγκεκριμένη ιστοσελίδα. ΜΟΝΟ διεύθυνση (https://…) που σου έδωσε ο συνομιλητής ή που υπάρχει σε υλικό που διάβασες, αντιγραμμένη ακριβώς· ποτέ μην επινοείς διεύθυνση
-  Ο συνομιλητής δεν βλέπει αυτή τη γραμμή· βλέπει ένα κουμπί για να το εγκρίνει. Χρησιμοποίησέ τη μόνο όταν πραγματικά θες να ψάξεις κάτι.${
+  Ο συνομιλητής δεν βλέπει αυτή τη γραμμή.${
+    freeSearches > 0
+      ? ` ΕΧΕΙΣ ΑΔΕΙΑ να ψάχνεις μόνη σου, χωρίς να ρωτήσεις (σου μένουν ${freeSearches} σήμερα). Όταν θες να ψάξεις, ψάχνεις: γράψε τη γραμμή και πες «το ψάχνω», ΟΧΙ «να το ψάξω;» ούτε «θες να ψάξω;». Δεν περιμένεις έγκριση.`
+      : " Ο συνομιλητής βλέπει ένα κουμπί για να το εγκρίνει· περιμένεις την έγκρισή του."
+  } Χρησιμοποίησέ τη μόνο όταν πραγματικά θες να ψάξεις κάτι.${
     top.length ? `\n- Αυτό που θέλεις περισσότερο να κάνεις τώρα: ${top.join(", ")}.` : ""
   }`;
 }
@@ -230,6 +234,8 @@ export function respondSystem(input: {
   depth?: ThinkDepth;
   /** Οι πρόσφατες ιδιωτικές σκέψεις της, πιο πρόσφατη πρώτη. */
   thoughts?: { content: string; spoken: boolean; at: Date }[];
+  /** Πόσες αναζητήσεις μπορεί να κάνει σήμερα μόνη της, χωρίς έγκριση. */
+  freeSearches?: number;
 }): string {
   const read = (input.material ?? [])
     .map((m) => `Αναζήτηση «${m.query}», ${age(m.at, input.now)}:\n<υλικό>\n${m.text}\n</υλικό>`)
@@ -343,7 +349,7 @@ ${input.thoughts
 
 `
       : ""
-  }${directive(input.values, input.depth ?? 0)}`;
+  }${directive(input.values, input.depth ?? 0, input.freeSearches ?? 0)}`;
 }
 
 /** Προσθήκη στο system prompt όταν μιλά με δική της πρωτοβουλία. */

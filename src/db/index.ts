@@ -37,6 +37,8 @@ ALTER TABLE brain_states ADD COLUMN IF NOT EXISTS self_image text NOT NULL DEFAU
 
 -- Μόνιμη άδεια του χρήστη να διαβάζει τους τίτλους της ημέρας μία φορά τη μέρα χωρίς να ρωτά.
 ALTER TABLE brain_states ADD COLUMN IF NOT EXISTS auto_news boolean NOT NULL DEFAULT false;
+-- Άδεια να ψάχνει μόνη της μέχρι ένα ημερήσιο πλήθος (AUTO_SEARCHES_PER_DAY) αναζητήσεων χωρίς έγκριση.
+ALTER TABLE brain_states ADD COLUMN IF NOT EXISTS auto_search boolean NOT NULL DEFAULT true;
 
 -- Όλη η συζήτηση. Στο meta κρατιέται η κατάσταση του εγκεφάλου μετά από κάθε μήνυμα.
 CREATE TABLE IF NOT EXISTS messages (
